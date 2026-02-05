@@ -1,0 +1,40 @@
+[[ $- != *i* ]] && return
+
+export HISTFILE="$HOME/.zsh_history"
+export HISTSIZE=10000
+export SAVEHIST=10000
+setopt HIST_IGNORE_ALL_DUPS
+setopt HIST_REDUCE_BLANKS
+setopt SHARE_HISTORY
+setopt INC_APPEND_HISTORY
+
+autoload -Uz compinit
+if [[ -n "${ZDOTDIR:-}" ]]; then
+  compinit -d "$ZDOTDIR/.zcompdump"
+else
+  compinit
+fi
+
+autoload -Uz colors && colors
+export CLICOLOR=1
+
+autoload -Uz vcs_info
+zstyle ':vcs_info:git:*' formats '%b'
+precmd() { vcs_info }
+
+setopt PROMPT_SUBST
+PROMPT='%F{cyan}%n@%m%f %F{blue}%~%f ${vcs_info_msg_0_:+%F{magenta}(${vcs_info_msg_0_})%f }%F{green}➜%f '
+RPROMPT='%(?..%F{red}%?%f)'
+
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+alias gs='git status -sb'
+alias gd='git diff'
+
+export PATH="$HOME/.local/bin:$PATH"
+[[ -f "$HOME/.local/bin/env" ]] && source "$HOME/.local/bin/env"
+
+if [[ -x /usr/bin/dircolors ]]; then
+  eval "$(dircolors -b)"
+fi

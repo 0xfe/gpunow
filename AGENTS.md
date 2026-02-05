@@ -1,43 +1,44 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `manage-gpu.sh`: Single entrypoint script to create/manage the GCP GPU VM.
-- `README.md`: Usage, prerequisites, and operational notes.
-- `AGENTS.md`: This contributor guide.
-
-There are no submodules, libraries, or tests in this repo. Keep additions minimal and aligned with the single-script focus.
+- `go/`: Go module for the `gpunow` CLI.
+- `go/cmd/gpunow`: CLI entrypoint.
+- `go/internal/`: Core packages for config, GCP API, cluster/vm logic, SSH/SCP, UI, logging, and validation.
+- `configs/<name>/`: Config profiles with `config.toml`, `cloud-init.yaml`, `setup.sh`.
+- `VERSION`: Version string baked into binaries.
+- `justfile`: Build/test helpers.
+- `README.md`: Usage and operational notes.
+- `DESIGN.md`: Design decisions and architecture.
+- `plan.md`: Milestones and progress log.
+- `ai-state.md`: Compact AI-facing repo context.
 
 ## Build, Test, and Development Commands
-There is no build system or test suite.
-- Run the script locally:
-  - `chmod +x manage-gpu.sh`
-  - `./manage-gpu.sh start` (create/start the instance)
-  - `./manage-gpu.sh stop` (delete the instance and disks)
-  - `./manage-gpu.sh show` (describe the instance)
-- Prerequisites are described in `README.md` (gcloud CLI, auth, quotas).
+- `just build`
+- `just test`
+- `just fmt`
+- `just vet`
+- `just tidy`
 
 ## Coding Style & Naming Conventions
-- Bash script only; keep it POSIX-friendly where possible.
-- Indentation: 2 spaces; keep lines readable and wrap long flags with `\`.
-- Use explicit variable names (`PROJECT`, `ZONE`, `INSTANCE_NAME`).
-- Preserve `set -euo pipefail` and avoid silent failures.
-- Script naming: verbs for actions, e.g., `manage-gpu.sh`.
+- Go code only under `go/`.
+- Prefer explicit, readable names (e.g., `ProjectID`, `InstanceName`).
+- Keep interfaces small and focused for testability.
+- Use `zap` for logging; default level WARN.
+- Keep CLI output consistent and styled via the `ui` package.
 
 ## Testing Guidelines
-No automated tests are present. If you change behavior, verify manually using:
-- `./manage-gpu.sh show` before/after
-- `./manage-gpu.sh start` and `./manage-gpu.sh stop`
-Document any manual validation in your PR.
+- Use unit tests for config parsing/validation and name parsing.
+- Mock GCP interactions via interfaces.
+- Document manual validation in PRs when cloud changes are involved.
 
 ## Commit & Pull Request Guidelines
-- Commit history does not follow a strict convention. Use short, imperative messages (e.g., "Update GPU deletion flow").
-- PRs should include:
-  - A brief summary of what changed and why.
-  - Commands run (or “Not run” if none).
-  - Any required configuration changes or risks (e.g., billing impact).
-  - An explicit confirmation that `README.md` was reviewed and updated for any code changes in this directory.
+- Short, imperative commit messages (e.g., "Add cluster subnet derivation").
+- PRs should include a summary of changes and rationale.
+- PRs should include commands run (or “Not run”).
+- PRs should include configuration changes or risks.
+- PRs should confirm `README.md` was reviewed and updated.
 
 ## Security & Configuration Tips
-- This repo references a specific GCP project, zone, service account, and image.
-- Treat these values as sensitive operational config; avoid copying secrets into this repo.
-- If you adjust project/zone defaults, update `README.md` and keep the script’s flags in sync.
+- Avoid committing secrets or credentials.
+- Treat project/zone/service account values as sensitive operational config.
+- Keep `README.md` and `configs/default/config.toml` in sync when defaults change.

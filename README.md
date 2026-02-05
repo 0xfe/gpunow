@@ -1,105 +1,138 @@
-# GPU VM launcher (GCP)
+# GPUNow
 
-This repo contains a single helper script, `manage-gpu.sh`, which creates and manages a spot (preemptible) GPU VM named `gpu0` in GCP.
+`gpunow` lets you quickly spin up ephemeral GPU VMs or cluster in GCP. It's great for running one-off expermentation, training,
+or other GPU-heavy workloads.
+
+```
+➜ gpunow vm start
+✓ Created gpu0
+
+➜ gpunow vm status
+gpu0 (default) RUNNING
+• Auto-terminating in 11h 7m (at 04:26am)
+• Zone: us-east1-d
+• Machine: g2-standard-16
+  -> api: compute.machineTypes.get projects/symbolic-axe-717/zones/us-east1-d/machineTypes/g2-standard-16
+  • CPUs: 16 (X86_64)
+  • RAM: 64 GB
+  • GPU: nvidia-l4 x1
+• External IP: 34.26.181.230
+
+➜   ./bin/gpunow ssh
+gpu0$ 
+```
 
 ## Prerequisites
+- Go 1.22+ (for building).
+- GCP credentials with Compute Engine permissions.
+- Compute Engine API enabled and quota for the selected GPU type.
+Note: `gpunow` talks directly to the Compute Engine API; `gcloud` is only needed for authentication convenience.
 
-Install the GCP SDK:
+## Authentication (ADC)
 
+Recommended (user credentials):
 ```bash
-# Install on mac
-brew install --cask google-cloud-sdk
-
-# Login
-gcloud auth login
-
-# Set defaults
-gcloud config set project symbolic-axe-717
-gcloud config set compute/zone us-east1-d
+gcloud auth application-default login
+gcloud auth application-default set-quota-project <your-project-id>
 ```
 
-Note: this tool expects that there are project-wide SSH keys setup, and the default
-user is `mo`.
-
-## Usage
-
+## Build
 ```bash
-./manage-gpu.sh start
-./manage-gpu.sh start --max-hours 6
+just build
+```
+Binary output: `./bin/gpunow`
 
-# ssh with your project-wide SSH key. you might get host key errors if you
-# reprivisioned the host.
-
-ssh mo@EXTERNAL_IP
-
-# setup.sh runs on first boot via cloud-init
-# if needed:
-mo@gpu0$ ./setup.sh
-
-# zsh is the default shell; PATH updates are sourced from ~/.local/bin/env
+## Quickstart
+Single VM (defaults to `vm.default_name` from the config):
+```bash
+./bin/gpunow vm start
+./bin/gpunow vm status
+./bin/gpunow vm stop
 ```
 
-This will create a GPU VM named `gpu0` using a spot provisioning model with a 12-hour max run duration and auto-delete on termination.
-
-You can also stop, delete, or show the instance:
-
+Cluster:
 ```bash
-./manage-gpu.sh stop
-./manage-gpu.sh stop --delete
-./manage-gpu.sh stop --delete --keep-disks
-./manage-gpu.sh show
-./manage-gpu.sh update --max-hours 24
+./bin/gpunow cluster start my-cluster -n 3
+./bin/gpunow cluster status my-cluster
+./bin/gpunow cluster update my-cluster --max-hours 24
+./bin/gpunow cluster stop my-cluster --delete
 ```
 
-Open custom ports (default is `22,80,443,8000`):
-
+Reference a VM inside a cluster using `<cluster>/<index>`:
 ```bash
-./manage-gpu.sh start --ports 22,80,443,8000,4000,5000
+./bin/gpunow vm status my-cluster/0
+./bin/gpunow vm status my-cluster/2
 ```
 
-## Current Configuration
+SSH and SCP:
+```bash
+./bin/gpunow ssh my-cluster/0
+./bin/gpunow ssh my-cluster/2 -u mo -- nvidia-smi
+./bin/gpunow ssh            # defaults to vm.default_name
+./bin/gpunow scp ./local.txt my-cluster/2:/home/mo/
+./bin/gpunow scp my-cluster/0:/home/mo/logs.txt ./
+```
 
-- GPU: 1x NVIDIA L4 (24 GB).
-- CPU/RAM: `g2-standard-16` (16 vCPU, 64 GB RAM).
+## Configuration
+Configuration profiles live under `configs/<name>` and contain:
+- `config.toml`
+- `cloud-init.yaml`
+- `setup.sh`
+- `zshrc`
 
-Keep this section in sync with `manage-gpu.sh` if `MACHINE_TYPE` or `ACCELERATOR` changes.
+The default profile is `configs/default`. Use `-c/--config` to select another profile:
+```bash
+./bin/gpunow cluster start my-cluster -n 3 -c gpu-l4
+```
 
-## Customization
-
-Edit `manage-gpu.sh` to adjust:
-
-- Project or zone (`--project`, `--zone`)
-- Machine type (`--machine-type`)
-- GPU type/count (`--accelerator`)
-- Boot disk size/type (`--create-disk`)
-- Service account and scopes (`--service-account`, `--scopes`)
-- Network tags/labels
-- Cloud-init template (`gpu-cloud-init.yaml`)
-- Setup script (`setup.sh`)
+Key settings in `config.toml`:
+- Project and zone
+- VM/cluster defaults (machine type, GPU type/count, max run hours)
+- Network defaults and exposed ports
+- Service account and scopes
+- Disk image and size
+- Optional hostname domain for FQDN hostnames (`instance.hostname_domain`)
 
 ## Behavior Notes
+- Each cluster gets its own VPC and subnet; all nodes are reachable internally.
+- Instance 0 is the master node and gets a public IP.
+- SSH/SCP to non-master nodes proxies through the master automatically.
+- `gpunow ssh` forwards your agent so you can hop from the master to workers.
+- `vm` commands accept either a name or a `cluster/index` target.
+- VM creation uses the configured `network.default_network`.
+- `vm start` with a `cluster/index` target only starts existing nodes; use `cluster start` to create nodes.
+- Hostnames: GCE requires a fully qualified domain name (FQDN) if you set `instance.hostname_domain`.
+  Leave it empty to use the default internal DNS hostname derived from the instance name.
 
-- `start` will start an existing stopped instance; if the instance was deleted, it will be recreated.
-- If a boot disk named `gpu0` already exists, `start` reuses it when recreating the VM.
-- `stop` without flags only stops the VM. Use `--delete` to delete the VM, and `--keep-disks` to preserve disks.
-- Spot terminations or `--delete` remove the VM; with `auto-delete` enabled on the boot disk, data on that disk is lost unless you explicitly keep disks.
-- Stopping the instance does not delete disks; storage is only removed when the VM is deleted and auto-delete is enabled.
-- Use `--max-hours N` with `start` to set a different max run duration. The default is 12 hours.
-- Use `update --max-hours N` to change the max run duration on an existing instance (instance must be stopped).
+## Repository Layout
+- `go/`: Go source code
+- `configs/`: config templates
+- `VERSION`: version string used at build time
+- `justfile`: build/test helpers
 
-## Cloud-init
-
-The VM is provisioned from the `gpu-cloud-init.yaml` template on creation. `manage-gpu.sh` renders the template by inlining `setup.sh`, then applies it as user-data. The cloud-init flow performs an apt update, installs base packages (including zsh), ensures the `mo` user exists, fixes ownership of `/home/mo`, writes and runs `/home/mo/setup.sh`, and configures UFW to allow ports 22 and 8000. It also adds `source "$HOME/.local/bin/env"` to `/home/mo/.zshrc` so `uv` is on PATH in new shells.
-
-## Cleanup
-
-If you need to delete the instance manually:
-
+## Development
 ```bash
-gcloud compute instances delete gpu0 --zone=us-east1-d
+just test
+just fmt
+just vet
 ```
 
-## Notes
+## Service Accounts
 
-- Spot capacity is not guaranteed; the instance may be terminated at any time.
-- The script uses `gcloud beta` for the `max-run-duration` flag. Ensure your CLI has the beta components available.
+Service account alternative:
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+```
+
+Required permissions (at minimum):
+- `roles/compute.admin` (instances, disks, networks, firewall rules)
+- `roles/iam.serviceAccountUser` (attach the configured service account)
+
+Troubleshooting `invalid_grant`:
+- Re-run `gcloud auth application-default login`.
+- If it persists, revoke and re-login:
+```bash
+gcloud auth application-default revoke
+gcloud auth application-default login
+```
+

@@ -1,0 +1,82 @@
+# gpunow configuration (default profile)
+# This file is intentionally structured for extensibility.
+
+[project]
+id = "symbolic-axe-717"
+zone = "us-east1-d"
+
+[cluster]
+# Network names are derived from: <network_name_prefix>-<cluster>
+network_name_prefix = "gpunow"
+# Subnet CIDR for a cluster is deterministically derived from the base
+# CIDR and prefix length using a hash of the cluster name.
+subnet_cidr_base = "10.200.0.0/16"
+subnet_prefix = 24
+
+[vm]
+# Default name used for single-VM commands when no name is provided.
+default_name = "gpu0"
+
+[instance]
+machine_type = "g2-standard-16"
+provisioning_model = "SPOT"
+maintenance_policy = "TERMINATE"
+termination_action = "DELETE"
+max_run_hours = 12
+restart_on_failure = false
+key_revocation_action = "stop"
+# Optional: when set, gpunow will set the instance hostname to <name>.<hostname_domain>.
+# Leave empty to let GCE choose the default internal DNS hostname.
+hostname_domain = "mo.town"
+
+[network]
+default_network = "default"
+stack_type = "IPV4_ONLY"
+network_tier = "PREMIUM"
+ports = [22, 80, 443, 8000]
+tags_base = ["http-server", "https-server", "lb-health-check"]
+
+[gpu]
+type = "nvidia-l4"
+count = 1
+
+[disk]
+boot = true
+auto_delete = true
+size_gb = 200
+type = "pd-standard"
+mode = "rw"
+image = "projects/ubuntu-os-accelerator-images/global/images/ubuntu-accelerator-2404-amd64-with-nvidia-580-v20260118"
+
+[service_account]
+email = "846951638556-compute@developer.gserviceaccount.com"
+scopes = [
+  "https://www.googleapis.com/auth/devstorage.read_only",
+  "https://www.googleapis.com/auth/logging.write",
+  "https://www.googleapis.com/auth/monitoring.write",
+  "https://www.googleapis.com/auth/service.management.readonly",
+  "https://www.googleapis.com/auth/servicecontrol",
+  "https://www.googleapis.com/auth/trace.append",
+]
+
+[shielded]
+secure_boot = false
+vtpm = true
+integrity_monitoring = true
+
+[labels]
+gpu = ""
+dev = ""
+"goog-ec-src" = "vm_add-gcloud"
+
+[reservation]
+affinity = "none"
+
+[ssh]
+# Default SSH username used for gpunow ssh/scp when -u is not provided.
+default_user = "mo"
+
+[files]
+cloud_init = "cloud-init.yaml"
+setup_script = "setup.sh"
+zshrc = "zshrc"
