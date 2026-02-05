@@ -9,17 +9,20 @@ import (
 
 	"gpunow/internal/config"
 	"gpunow/internal/gcp"
+	"gpunow/internal/home"
 	"gpunow/internal/logging"
+	appstate "gpunow/internal/state"
 	"gpunow/internal/ui"
 )
 
 type State struct {
-	Config    *config.Config
-	UI        *ui.UI
-	Logger    *zap.Logger
-	ConfigDir string
-	Profile   string
-	Compute   gcp.Compute
+	Config  *config.Config
+	UI      *ui.UI
+	Logger  *zap.Logger
+	Profile string
+	Home    home.Home
+	State   *appstate.Store
+	Compute gcp.Compute
 }
 
 const stateKey = "state"
@@ -32,8 +35,7 @@ func GetState(c *cli.Context) (*State, error) {
 		return existing, nil
 	}
 
-	profile := c.String("config")
-	configDir := c.String("config-dir")
+	profile := c.String("profile")
 	uiPrinter := ui.New()
 
 	logger, err := logging.New(c.String("log-level"))
@@ -41,17 +43,23 @@ func GetState(c *cli.Context) (*State, error) {
 		return nil, fmt.Errorf("init logger: %w", err)
 	}
 
-	cfg, err := config.Load(profile, configDir)
+	resolvedHome, err := home.Resolve()
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, err := config.Load(profile, resolvedHome.ProfilesDir)
 	if err != nil {
 		return nil, err
 	}
 
 	state := &State{
-		Config:    cfg,
-		UI:        uiPrinter,
-		Logger:    logger,
-		ConfigDir: configDir,
-		Profile:   profile,
+		Config:  cfg,
+		UI:      uiPrinter,
+		Logger:  logger,
+		Profile: profile,
+		Home:    resolvedHome,
+		State:   appstate.New(resolvedHome.StateDir),
 	}
 	c.App.Metadata[stateKey] = state
 	return state, nil

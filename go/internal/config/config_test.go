@@ -8,7 +8,7 @@ import (
 )
 
 func TestLoadDefaultConfig(t *testing.T) {
-	base := filepath.Join("..", "..", "..", "configs")
+	base := filepath.Join("..", "..", "..", "profiles")
 	cfg, err := Load("default", base)
 	if err != nil {
 		t.Fatalf("load default config: %v", err)
@@ -42,7 +42,7 @@ func TestLoadInvalidConfig(t *testing.T) {
 }
 
 func TestInvalidHostnameDomain(t *testing.T) {
-	baseConfigPath := filepath.Join("..", "..", "..", "configs", "default", "config.toml")
+	baseConfigPath := filepath.Join("..", "..", "..", "profiles", "default", "config.toml")
 	data, err := os.ReadFile(baseConfigPath)
 	if err != nil {
 		t.Fatalf("read default config: %v", err)

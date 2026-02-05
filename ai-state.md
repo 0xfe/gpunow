@@ -6,7 +6,8 @@ Purpose: Go CLI to manage GPU VMs/clusters on GCP. Replaces legacy shell script.
 Key files/dirs:
 - plan.md: milestone plan + progress log. Update status + append progress.
 - DESIGN.md: architecture + behavioral decisions.
-- configs/<name>/: config profiles. `configs/default` contains config.toml, cloud-init.yaml, setup.sh.
+- profiles/<name>/: config profiles. `profiles/default` contains config.toml, cloud-init.yaml, setup.sh, zshrc.
+- state/state.json: cluster state (profile, timestamps, last action).
 - go/: Go module. CLI entrypoint at go/cmd/gpunow.
 - VERSION: semantic version used for build metadata.
 - justfile: build/test helpers.
@@ -23,8 +24,10 @@ Config assumptions:
 - SSH/SCP uses ProxyJump via master for non-0 nodes.
 
 Work status:
-- M0 complete: go module + skeleton, VERSION, justfile, DESIGN.md, ai-state.md, configs/default config.toml, README/AGENTS updated, cloud-init/setup moved.
+- M0 complete: go module + skeleton, VERSION, justfile, DESIGN.md, ai-state.md, profiles/default config.toml, README/AGENTS updated, cloud-init/setup moved.
 - M1 complete: config loader/validation, CLI skeleton, logging/UI scaffolding, target parsing, initial tests.
+- Home resolution: GPUNOW_HOME → ./profiles → ~/.config/gpunow. State written under <home>/state.
+- `gpunow init` initializes ~/.config/gpunow/profiles/default from a source profile directory.
 - M2 complete: VM ops using Compute API, cloud-init rendering, updated CLI, tests.
 - M3 complete: cluster networking and lifecycle, subnet derivation, labels, tests.
 - M4 complete: SSH/SCP resolution via master proxy, command execution, tests.

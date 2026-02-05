@@ -5,7 +5,7 @@
 
 ## Goals
 - Simple, consistent CLI for VM and cluster lifecycle.
-- Configuration profiles under `configs/<name>` with a default profile.
+- Configuration profiles under `profiles/<name>` with a default profile.
 - Per-cluster networking with internal reachability for all nodes.
 - Master node (instance 0) has a public IP; all other nodes are private.
 - SSH/SCP convenience with automatic jump through the master node.
@@ -21,7 +21,8 @@
 - `internal/ui`: terminal output styling and progress.
 
 ## CLI Surface
-- `gpunow cluster start <cluster> -n/--num-instances N [-c/--config name]`
+- `gpunow init`
+- `gpunow cluster start <cluster> -n/--num-instances N [-p/--profile name]`
 - `gpunow cluster stop <cluster> [--delete] [--keep-disks]`
 - `gpunow cluster status <cluster>`
 - `gpunow cluster update <cluster> --max-hours N`
@@ -33,9 +34,13 @@
 - `gpunow scp <src> <dst> [-u user]`
 
 ## Configuration
-- Profile directory: `configs/<name>`.
+- Profile directory: `profiles/<name>`.
 - Required files: `config.toml`, `cloud-init.yaml`, `setup.sh`.
 - `config.toml` is parsed and validated; default values are explicit.
+ - Profile discovery order: `GPUNOW_HOME` → `./profiles` → `~/.config/gpunow`.
+
+## State
+- Cluster state is stored under `<home>/state/state.json` with profile, timestamps, and last action.
 
 Key schema highlights:
 - `project.id`, `project.zone`

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/urfave/cli/v2"
 
@@ -23,15 +24,11 @@ func NewApp() *cli.App {
 		Version: version.Version,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:    "config",
-				Aliases: []string{"c"},
+				Name:    "profile",
+				Aliases: []string{"p"},
 				Value:   "default",
-				Usage:   "Config profile name",
-			},
-			&cli.StringFlag{
-				Name:  "config-dir",
-				Value: "configs",
-				Usage: "Config base directory",
+				Usage:   "Profile name",
+				EnvVars: []string{"GPUNOW_PROFILE"},
 			},
 			&cli.StringFlag{
 				Name:  "log-level",
@@ -40,10 +37,12 @@ func NewApp() *cli.App {
 			},
 		},
 		Commands: []*cli.Command{
+			initCommand(),
 			vmCommand(),
 			clusterCommand(),
 			sshCommand(),
 			scpCommand(),
+			stateCommand(),
 			versionCommand(),
 		},
 	}
@@ -323,7 +322,15 @@ func clusterStart(c *cli.Context) error {
 	}
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
-	return service.Start(c.Context, clusterName, cluster.StartOptions{NumInstances: c.Int("num-instances")})
+	if err := service.Start(c.Context, clusterName, cluster.StartOptions{NumInstances: c.Int("num-instances")}); err != nil {
+		return err
+	}
+	if state.State != nil {
+		if err := state.State.RecordClusterStart(clusterName, state.Profile, c.Int("num-instances"), time.Now()); err != nil {
+			state.UI.Warnf("Failed to update state: %v", err)
+		}
+	}
+	return nil
 }
 
 func clusterStop(c *cli.Context) error {
@@ -346,10 +353,18 @@ func clusterStop(c *cli.Context) error {
 	}
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
-	return service.Stop(c.Context, clusterName, cluster.StopOptions{
+	if err := service.Stop(c.Context, clusterName, cluster.StopOptions{
 		Delete:    c.Bool("delete"),
 		KeepDisks: c.Bool("keep-disks"),
-	})
+	}); err != nil {
+		return err
+	}
+	if state.State != nil {
+		if err := state.State.RecordClusterStop(clusterName, c.Bool("delete"), time.Now()); err != nil {
+			state.UI.Warnf("Failed to update state: %v", err)
+		}
+	}
+	return nil
 }
 
 func clusterStatus(c *cli.Context) error {
@@ -391,7 +406,15 @@ func clusterUpdate(c *cli.Context) error {
 	}
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
-	return service.Update(c.Context, clusterName, cluster.UpdateOptions{MaxRunHours: c.Int("max-hours")})
+	if err := service.Update(c.Context, clusterName, cluster.UpdateOptions{MaxRunHours: c.Int("max-hours")}); err != nil {
+		return err
+	}
+	if state.State != nil {
+		if err := state.State.RecordClusterUpdate(clusterName, time.Now()); err != nil {
+			state.UI.Warnf("Failed to update state: %v", err)
+		}
+	}
+	return nil
 }
 
 func sshAction(c *cli.Context) error {
@@ -438,6 +461,7 @@ func sshAction(c *cli.Context) error {
 		Command:      commandArgs,
 	})
 
+	state.UI.Detailf(1, "cmd: %s", formatCommand("ssh", args))
 	cmd := exec.Command("ssh", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -447,14 +471,6 @@ func sshAction(c *cli.Context) error {
 
 func scpAction(c *cli.Context) error {
 	state, err := GetState(c)
-	if err != nil {
-		return err
-	}
-	_, err = requireArg(c, 0, "src")
-	if err != nil {
-		return err
-	}
-	_, err = requireArg(c, 1, "dst")
 	if err != nil {
 		return err
 	}
@@ -468,8 +484,10 @@ func scpAction(c *cli.Context) error {
 		return fmt.Errorf("scp user is required (set --user or ssh.default_user)")
 	}
 
-	srcArg := c.Args().Get(0)
-	dstArg := c.Args().Get(1)
+	flags, srcArg, dstArg, err := parseScpArgs(c.Args().Slice())
+	if err != nil {
+		return err
+	}
 
 	srcSpec, err := ssh.ParseRemoteSpec(srcArg)
 	if err != nil {
@@ -518,12 +536,14 @@ func scpAction(c *cli.Context) error {
 		dst = fmt.Sprintf("%s:%s", ssh.FormatUserHost(user, resolved.Host), ssh.NormalizePath(dstSpec.Path))
 	}
 
-	args := ssh.BuildSCPArgs(ssh.SCPOptions{
+	args := append([]string{}, flags...)
+	args = append(args, ssh.BuildSCPArgs(ssh.SCPOptions{
 		ProxyJump: proxy,
 		Src:       src,
 		Dst:       dst,
-	})
+	})...)
 
+	state.UI.Detailf(1, "cmd: %s", formatCommand("scp", args))
 	cmd := exec.Command("scp", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

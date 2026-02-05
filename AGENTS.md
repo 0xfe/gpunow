@@ -4,7 +4,8 @@
 - `go/`: Go module for the `gpunow` CLI.
 - `go/cmd/gpunow`: CLI entrypoint.
 - `go/internal/`: Core packages for config, GCP API, cluster/vm logic, SSH/SCP, UI, logging, and validation.
-- `configs/<name>/`: Config profiles with `config.toml`, `cloud-init.yaml`, `setup.sh`.
+- `profiles/<name>/`: Config profiles with `config.toml`, `cloud-init.yaml`, `setup.sh`.
+- `state/`: Local state (clusters, profiles, timestamps) under the resolved gpunow home.
 - `VERSION`: Version string baked into binaries.
 - `justfile`: Build/test helpers.
 - `README.md`: Usage and operational notes.
@@ -41,4 +42,4 @@
 ## Security & Configuration Tips
 - Avoid committing secrets or credentials.
 - Treat project/zone/service account values as sensitive operational config.
-- Keep `README.md` and `configs/default/config.toml` in sync when defaults change.
+- Keep `README.md` and `profiles/default/config.toml` in sync when defaults change.

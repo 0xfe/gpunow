@@ -34,12 +34,12 @@ type Config struct {
 }
 
 type Paths struct {
-	Dir            string
-	ConfigFile     string
-	CloudInitFile  string
-	SetupScript    string
-	ZshrcFile      string
-	ConfigBasePath string
+	Dir              string
+	ConfigFile       string
+	CloudInitFile    string
+	SetupScript      string
+	ZshrcFile        string
+	ProfilesBasePath string
 }
 
 type ProjectConfig struct {
@@ -117,7 +117,7 @@ type FilesConfig struct {
 
 func Load(profile string, baseDir string) (*Config, error) {
 	if baseDir == "" {
-		baseDir = "configs"
+		baseDir = "profiles"
 	}
 	if profile == "" {
 		profile = "default"
@@ -127,7 +127,7 @@ func Load(profile string, baseDir string) (*Config, error) {
 	cfgPath := filepath.Join(cfgDir, "config.toml")
 
 	if _, err := os.Stat(cfgPath); err != nil {
-		return nil, fmt.Errorf("config not found: %s", cfgPath)
+		return nil, fmt.Errorf("profile not found: %s", cfgPath)
 	}
 
 	var cfg Config
@@ -138,12 +138,12 @@ func Load(profile string, baseDir string) (*Config, error) {
 	applyDefaults(&cfg)
 	cfg.Profile = profile
 	cfg.Paths = Paths{
-		Dir:            cfgDir,
-		ConfigFile:     cfgPath,
-		CloudInitFile:  filepath.Join(cfgDir, cfg.Files.CloudInit),
-		SetupScript:    filepath.Join(cfgDir, cfg.Files.SetupScript),
-		ZshrcFile:      filepath.Join(cfgDir, cfg.Files.Zshrc),
-		ConfigBasePath: baseDir,
+		Dir:              cfgDir,
+		ConfigFile:       cfgPath,
+		CloudInitFile:    filepath.Join(cfgDir, cfg.Files.CloudInit),
+		SetupScript:      filepath.Join(cfgDir, cfg.Files.SetupScript),
+		ZshrcFile:        filepath.Join(cfgDir, cfg.Files.Zshrc),
+		ProfilesBasePath: baseDir,
 	}
 
 	if err := validateConfig(&cfg); err != nil {

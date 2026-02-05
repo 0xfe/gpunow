@@ -43,6 +43,11 @@ just build
 Binary output: `./bin/gpunow`
 
 ## Quickstart
+Initialize a home profile directory:
+```bash
+./bin/gpunow init
+```
+
 Single VM (defaults to `vm.default_name` from the config):
 ```bash
 ./bin/gpunow vm start
@@ -71,19 +76,36 @@ SSH and SCP:
 ./bin/gpunow ssh            # defaults to vm.default_name
 ./bin/gpunow scp ./local.txt my-cluster/2:/home/mo/
 ./bin/gpunow scp my-cluster/0:/home/mo/logs.txt ./
+./bin/gpunow scp -r -P 2222 ./dir my-cluster/2:/home/mo/
+./bin/gpunow scp -- -weird ./local.txt   # use -- to separate flags from paths
+```
+
+State:
+```bash
+./bin/gpunow state
+./bin/gpunow state raw
 ```
 
 ## Configuration
-Configuration profiles live under `configs/<name>` and contain:
+Configuration profiles live under `profiles/<name>` and contain:
 - `config.toml`
 - `cloud-init.yaml`
 - `setup.sh`
 - `zshrc`
 
-The default profile is `configs/default`. Use `-c/--config` to select another profile:
+The default profile is `profiles/default`. Use `-p/--profile` to select another profile:
 ```bash
-./bin/gpunow cluster start my-cluster -n 3 -c gpu-l4
+./bin/gpunow cluster start my-cluster -n 3 -p gpu-l4
 ```
+
+## GPUNOW_HOME, Profiles, and State
+`gpunow` resolves its home directory in this order:
+1. `GPUNOW_HOME` if set.
+2. `./profiles` in the current working directory.
+3. `~/.config/gpunow`.
+
+Profiles are read from `<home>/profiles`, and state is written to `<home>/state/state.json`.
+Use `gpunow init` to create `~/.config/gpunow/profiles/default`.
 
 Key settings in `config.toml`:
 - Project and zone
@@ -106,7 +128,7 @@ Key settings in `config.toml`:
 
 ## Repository Layout
 - `go/`: Go source code
-- `configs/`: config templates
+- `profiles/`: profile templates
 - `VERSION`: version string used at build time
 - `justfile`: build/test helpers
 
@@ -135,4 +157,3 @@ Troubleshooting `invalid_grant`:
 gcloud auth application-default revoke
 gcloud auth application-default login
 ```
-
