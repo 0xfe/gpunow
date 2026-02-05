@@ -1,0 +1,31 @@
+#cloud-config
+package_update: true
+packages:
+  - git
+  - build-essential
+  - python3-dev
+  - zsh
+
+users:
+  - name: mo
+    gecos: mo
+    shell: /bin/zsh
+    groups: [sudo]
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    lock_passwd: true
+
+write_files:
+  - path: /home/mo/setup.sh
+    owner: mo:mo
+    permissions: "0755"
+    content: |
+      {{SETUP_SH}}
+
+runcmd:
+  - [bash, -lc, "if id -u mo >/dev/null 2>&1; then chown -R mo:mo /home/mo; fi"]
+  - [bash, -lc, "su - mo -c '/home/mo/setup.sh'"]
+  - [bash, -lc, "grep -qxF 'source \"$HOME/.local/bin/env\"' /home/mo/.zshrc 2>/dev/null || echo 'source \"$HOME/.local/bin/env\"' >> /home/mo/.zshrc"]
+  - [bash, -lc, "chown mo:mo /home/mo/.zshrc"]
+  - ufw allow 22/tcp
+  - ufw allow 8000/tcp
+  - ufw --force enable
