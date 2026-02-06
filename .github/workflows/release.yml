@@ -55,10 +55,27 @@ jobs:
           cd ..
           tar -czf "dist/${pkg}.tar.gz" -C dist "${pkg}"
           sha256sum "dist/${pkg}.tar.gz" > "dist/${pkg}.tar.gz.sha256"
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
       - name: Publish Release Assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.tar.gz
-            dist/*.sha256
+            **/*.tar.gz
+            **/*.sha256
           generate_release_notes: true

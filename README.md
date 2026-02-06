@@ -42,7 +42,6 @@ gpu0$
 - Go 1.25.6 (for building).
 - GCP credentials with Compute Engine permissions.
 - Compute Engine API enabled and quota for the selected GPU type.
-Note: `gpunow` talks directly to the Compute Engine API; `gcloud` is only needed for authentication convenience.
 
 ## Authentication (ADC)
 
