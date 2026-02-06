@@ -12,33 +12,60 @@ import (
 	"gpunow/internal/ui"
 )
 
-func initCommand() *cli.Command {
+func installCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "init",
-		Usage: "Initialize profiles in the user home directory",
+		Name:  "install",
+		Usage: "Install gpunow binary and default profile in user home",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "source",
 				Usage: "Source profile directory (defaults to ./profiles/default or ../profiles/default)",
 			},
 			&cli.BoolFlag{
-				Name:  "force",
-				Usage: "Overwrite existing default profile",
+				Name:  "overwrite",
+				Usage: "Overwrite existing ~/.config/gpunow",
 			},
 		},
-		Action: initAction,
+		Action: installAction,
 	}
 }
 
-func initAction(c *cli.Context) error {
+func installAction(c *cli.Context) error {
 	uiPrinter := ui.New()
 
-	root, err := resolveInitHome()
+	root, err := home.DefaultRoot()
 	if err != nil {
 		return err
 	}
+
+	if dirExists(root) {
+		if !c.Bool("overwrite") {
+			return fmt.Errorf("config already exists at %s (use --overwrite to replace)", root)
+		}
+		if err := os.RemoveAll(root); err != nil {
+			return fmt.Errorf("remove existing config: %w", err)
+		}
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve binary path: %w", err)
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory: %w", err)
+	}
+	binDir := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return fmt.Errorf("create bin dir: %w", err)
+	}
+	targetBin := filepath.Join(binDir, "gpunow")
+	if err := copyFileWithMode(exe, targetBin, 0o755); err != nil {
+		return err
+	}
+
 	profilesDir := filepath.Join(root, "profiles")
-	targetProfile := filepath.Join(profilesDir, "default")
 	stateDir := filepath.Join(root, "state")
 
 	source := c.String("source")
@@ -56,30 +83,20 @@ func initAction(c *cli.Context) error {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 
-	if dirExists(targetProfile) {
-		if !c.Bool("force") {
-			return fmt.Errorf("profile already exists at %s (use --force to overwrite)", targetProfile)
-		}
-		if err := os.RemoveAll(targetProfile); err != nil {
-			return fmt.Errorf("remove existing profile: %w", err)
-		}
-	}
-
+	targetProfile := filepath.Join(profilesDir, "default")
 	if err := copyDir(source, targetProfile); err != nil {
 		return err
 	}
 
+	uiPrinter.Successf("Installed %s", targetBin)
 	uiPrinter.Successf("Initialized profiles at %s", profilesDir)
 	uiPrinter.Infof("Default profile: %s", targetProfile)
 	uiPrinter.Infof("State dir: %s", stateDir)
+	uiPrinter.Heading("Shell setup")
+	uiPrinter.Infof("Add to ~/.zshrc or ~/.bashrc:")
+	uiPrinter.Dimf("export PATH=\"$HOME/.local/bin:$PATH\"")
+	uiPrinter.Dimf("export GPUNOW_HOME=\"%s\"", root)
 	return nil
-}
-
-func resolveInitHome() (string, error) {
-	if root := os.Getenv("GPUNOW_HOME"); root != "" {
-		return filepath.Clean(root), nil
-	}
-	return home.DefaultRoot()
 }
 
 func findDefaultProfileSource() (string, error) {
@@ -130,14 +147,14 @@ func copyDir(src, dst string) error {
 			}
 			continue
 		}
-		if err := copyFile(srcPath, dstPath); err != nil {
+		if err := copyFileWithMode(srcPath, dstPath, 0); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func copyFile(src, dst string) error {
+func copyFileWithMode(src, dst string, forceMode os.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("open source file: %w", err)
@@ -148,8 +165,12 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("stat source file: %w", err)
 	}
+	mode := info.Mode().Perm()
+	if forceMode != 0 {
+		mode = forceMode
+	}
 
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
 		return fmt.Errorf("open target file: %w", err)
 	}

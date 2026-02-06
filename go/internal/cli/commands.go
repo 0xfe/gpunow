@@ -37,7 +37,7 @@ func NewApp() *cli.App {
 			},
 		},
 		Commands: []*cli.Command{
-			initCommand(),
+			installCommand(),
 			vmCommand(),
 			clusterCommand(),
 			sshCommand(),

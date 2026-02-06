@@ -21,7 +21,7 @@
 - `internal/ui`: terminal output styling and progress.
 
 ## CLI Surface
-- `gpunow init`
+- `gpunow install`
 - `gpunow cluster start <cluster> -n/--num-instances N [-p/--profile name]`
 - `gpunow cluster stop <cluster> [--delete] [--keep-disks]`
 - `gpunow cluster status <cluster>`
@@ -37,7 +37,7 @@
 - Profile directory: `profiles/<name>`.
 - Required files: `config.toml`, `cloud-init.yaml`, `setup.sh`.
 - `config.toml` is parsed and validated; default values are explicit.
- - Profile discovery order: `GPUNOW_HOME` → `./profiles` → `~/.config/gpunow`.
+- Profile discovery order: `GPUNOW_HOME` → `~/.config/gpunow`.
 
 ## State
 - Cluster state is stored under `<home>/state/state.json` with profile, timestamps, and last action.

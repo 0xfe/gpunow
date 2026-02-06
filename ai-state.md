@@ -26,8 +26,8 @@ Config assumptions:
 Work status:
 - M0 complete: go module + skeleton, VERSION, justfile, DESIGN.md, ai-state.md, profiles/default config.toml, README/AGENTS updated, cloud-init/setup moved.
 - M1 complete: config loader/validation, CLI skeleton, logging/UI scaffolding, target parsing, initial tests.
-- Home resolution: GPUNOW_HOME → ./profiles → ~/.config/gpunow. State written under <home>/state.
-- `gpunow init` initializes ~/.config/gpunow/profiles/default from a source profile directory.
+- Home resolution: GPUNOW_HOME → ~/.config/gpunow. State written under <home>/state.
+- `gpunow install` copies the binary to ~/.local/bin and initializes ~/.config/gpunow/profiles/default from a source profile directory.
 - M2 complete: VM ops using Compute API, cloud-init rendering, updated CLI, tests.
 - M3 complete: cluster networking and lifecycle, subnet derivation, labels, tests.
 - M4 complete: SSH/SCP resolution via master proxy, command execution, tests.

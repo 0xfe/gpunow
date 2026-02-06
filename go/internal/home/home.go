@@ -18,13 +18,6 @@ func Resolve() (Home, error) {
 		return resolveFromRoot(root, "env")
 	}
 
-	cwd, cwdErr := os.Getwd()
-	if cwdErr == nil {
-		if dirExists(filepath.Join(cwd, "profiles")) {
-			return resolveFromRoot(cwd, "cwd")
-		}
-	}
-
 	configRoot, err := DefaultRoot()
 	if err != nil {
 		return Home{}, err
@@ -34,9 +27,6 @@ func Resolve() (Home, error) {
 	}
 
 	lookedAt := []string{}
-	if cwdErr == nil {
-		lookedAt = append(lookedAt, filepath.Join(cwd, "profiles"))
-	}
 	lookedAt = append(lookedAt, filepath.Join(configRoot, "profiles"))
 	return Home{}, fmt.Errorf("profiles directory not found (looked in: %s). Set GPUNOW_HOME or create profiles/default.", joinPaths(lookedAt))
 }

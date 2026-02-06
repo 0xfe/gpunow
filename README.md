@@ -3,10 +3,25 @@
 `gpunow` lets you quickly spin up ephemeral GPU VMs or cluster in GCP. It's great for running one-off expermentation, training,
 or other GPU-heavy workloads.
 
-```
-➜ gpunow vm start
+## Quickstart
+
+```bash
+# Make sure you have just installed
+$ just build
+
+# Install into ~/.local/bin and configs into ~/.config/gpunow
+./bin/gpunow install
+
+# Start a new shell, or exec bash/zsh so PATH is refreshed.
+
+# Authenticate with GCP
+gcloud auth application-default login
+
+# Start a VM
+$ gpunow vm start
 ✓ Created gpu0
 
+# See VM status
 ➜ gpunow vm status
 gpu0 (default) RUNNING
 • Auto-terminating in 11h 7m (at 04:26am)
@@ -18,7 +33,8 @@ gpu0 (default) RUNNING
   • GPU: nvidia-l4 x1
 • External IP: 34.26.181.230
 
-➜   ./bin/gpunow ssh
+# SSH to VM
+$ gpunow ssh
 gpu0$ 
 ```
 
@@ -43,9 +59,9 @@ just build
 Binary output: `./bin/gpunow`
 
 ## Quickstart
-Initialize a home profile directory:
+Install gpunow and initialize a home profile directory:
 ```bash
-./bin/gpunow init
+./bin/gpunow install
 ```
 
 Single VM (defaults to `vm.default_name` from the config):
@@ -101,11 +117,10 @@ The default profile is `profiles/default`. Use `-p/--profile` to select another 
 ## GPUNOW_HOME, Profiles, and State
 `gpunow` resolves its home directory in this order:
 1. `GPUNOW_HOME` if set.
-2. `./profiles` in the current working directory.
-3. `~/.config/gpunow`.
+2. `~/.config/gpunow`.
 
 Profiles are read from `<home>/profiles`, and state is written to `<home>/state/state.json`.
-Use `gpunow init` to create `~/.config/gpunow/profiles/default`.
+Use `gpunow install` to create `~/.config/gpunow/profiles/default`.
 
 Key settings in `config.toml`:
 - Project and zone
