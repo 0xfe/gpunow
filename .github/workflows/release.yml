@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+      - name: Test
+        working-directory: go
+        run: go test ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, darwin]
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+      - name: Build
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          commit="${GITHUB_SHA::7}"
+          build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          pkg="gpunow_${version}_${GOOS}_${GOARCH}"
+          out_dir="dist/${pkg}"
+          mkdir -p "$out_dir"
+          cd go
+          go build -ldflags "-X gpunow/internal/version.Version=${version} -X gpunow/internal/version.Commit=${commit} -X gpunow/internal/version.BuildTime=${build_time}" -o "../${out_dir}/gpunow" ./cmd/gpunow
+          cd ..
+          tar -czf "dist/${pkg}.tar.gz" -C dist "${pkg}"
+          sha256sum "dist/${pkg}.tar.gz" > "dist/${pkg}.tar.gz.sha256"
+      - name: Publish Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          generate_release_notes: true

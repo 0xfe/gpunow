@@ -1,6 +1,6 @@
 module gpunow
 
-go 1.24.0
+go 1.22.0
 
 require (
 	cloud.google.com/go/compute v1.54.0

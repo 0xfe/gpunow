@@ -154,6 +154,20 @@ just fmt
 just vet
 ```
 
+## Release
+Cut a release tag and trigger GitHub Actions:
+```bash
+just release [version]
+```
+
+If no version is provided, `just release` bumps the patch version from `VERSION` (strips `-dev`), commits the change, creates an annotated `vX.Y.Z` tag, and pushes the commit and tag to `origin`. GitHub Actions runs tests and publishes release artifacts for darwin/linux and amd64/arm64.
+
+Local release troubleshooting (same steps as GitHub Actions) can be run with:
+```bash
+just release-local [version]
+```
+This runs tests and builds release artifacts into `dist/` for darwin/linux and amd64/arm64.
+
 ## Service Accounts
 
 Service account alternative:
