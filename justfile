@@ -127,7 +127,7 @@ _resolve_version version="" bump="false":
     fi; \
   fi; \
   ver="${ver#v}"; \
-  if ! [[ "$ver" =~ '^[0-9]+\\.[0-9]+\\.[0-9]+$' ]]; then \
+  if ! [[ "$ver" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]; then \
     echo "error: invalid version '$ver' (expected x.y.z)"; \
     exit 1; \
   fi; \
