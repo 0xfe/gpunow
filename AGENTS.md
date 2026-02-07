@@ -43,3 +43,4 @@
 - Avoid committing secrets or credentials.
 - Treat project/zone/service account values as sensitive operational config.
 - Keep `README.md` and `profiles/default/config.toml` in sync when defaults change.
+- Tag all GCP resources that support labels with `gpunow=0xfe` (requested as `0xfe/gpunow` but slashes are not allowed in GCP label keys). This label is used for status sync and discovery.

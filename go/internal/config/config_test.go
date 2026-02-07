@@ -13,9 +13,6 @@ func TestLoadDefaultConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load default config: %v", err)
 	}
-	if cfg.VM.DefaultName == "" {
-		t.Fatalf("expected vm.default_name to be set")
-	}
 	if _, err := os.Stat(cfg.Paths.CloudInitFile); err != nil {
 		t.Fatalf("cloud-init file missing: %v", err)
 	}

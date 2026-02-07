@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-isatty"
@@ -15,6 +16,10 @@ type UI struct {
 	Err      io.Writer
 	UseColor bool
 	styles   styles
+	liveMu   sync.Mutex
+	writeMu  sync.Mutex
+	live     *LiveArea
+	split    *LiveSplit
 }
 
 type styles struct {
@@ -59,7 +64,7 @@ func New() *UI {
 }
 
 func (u *UI) Heading(text string) {
-	fmt.Fprintln(u.Out, u.style(u.styles.Heading, text))
+	u.line(u.Out, "", "%s", u.style(u.styles.Heading, text))
 }
 
 func (u *UI) Infof(format string, args ...any) {
@@ -80,7 +85,7 @@ func (u *UI) Errorf(format string, args ...any) {
 
 func (u *UI) Dimf(format string, args ...any) {
 	text := fmt.Sprintf(format, args...)
-	fmt.Fprintln(u.Out, u.style(u.styles.Dim, text))
+	u.line(u.Out, "", "%s", u.style(u.styles.Dim, text))
 }
 
 func (u *UI) InfofIndent(level int, format string, args ...any) {
@@ -89,14 +94,14 @@ func (u *UI) InfofIndent(level int, format string, args ...any) {
 	if prefix != "" {
 		text = prefix + " " + text
 	}
-	fmt.Fprintln(u.Out, u.Indent(level, text))
+	u.line(u.Out, "", "%s", u.Indent(level, text))
 }
 
 func (u *UI) Detailf(level int, format string, args ...any) {
 	text := fmt.Sprintf(format, args...)
 	prefix := "->"
 	line := u.Indent(level, fmt.Sprintf("%s %s", prefix, text))
-	fmt.Fprintln(u.Out, u.style(u.styles.Dim, line))
+	u.line(u.Out, "", "%s", u.style(u.styles.Dim, line))
 }
 
 func (u *UI) Indent(level int, text string) string {
@@ -111,6 +116,18 @@ func (u *UI) line(w io.Writer, prefix string, format string, args ...any) {
 	text := fmt.Sprintf(format, args...)
 	if prefix != "" {
 		text = prefix + " " + text
+	}
+	u.writeMu.Lock()
+	defer u.writeMu.Unlock()
+	if w == u.Out {
+		if split := u.currentSplit(); split != nil && split.Active() {
+			split.WriteLineLocked(w, text)
+			return
+		}
+		if live := u.currentLive(); live != nil && live.Active() {
+			live.WriteLineLocked(w, text)
+			return
+		}
 	}
 	fmt.Fprintln(w, text)
 }
@@ -132,6 +149,75 @@ func (u *UI) Status(text string) string {
 
 func (u *UI) Highlight(text string) string {
 	return u.style(u.styles.Highlight, text)
+}
+
+func (u *UI) LiveArea(lines int) *LiveArea {
+	area := newLiveArea(u, lines)
+	u.setLive(area)
+	return area
+}
+
+func (u *UI) setLive(area *LiveArea) {
+	u.liveMu.Lock()
+	defer u.liveMu.Unlock()
+	u.live = area
+}
+
+func (u *UI) clearLive(area *LiveArea) {
+	u.liveMu.Lock()
+	defer u.liveMu.Unlock()
+	if u.live == area {
+		u.live = nil
+	}
+}
+
+func (u *UI) currentLive() *LiveArea {
+	u.liveMu.Lock()
+	defer u.liveMu.Unlock()
+	return u.live
+}
+
+func (u *UI) hasLive() bool {
+	if split := u.currentSplit(); split != nil && split.Active() {
+		return true
+	}
+	if live := u.currentLive(); live != nil && live.Active() {
+		return true
+	}
+	return false
+}
+
+func (u *UI) StartLiveSplit() *LiveSplit {
+	u.liveMu.Lock()
+	defer u.liveMu.Unlock()
+	if u.split != nil && u.split.Active() {
+		return u.split
+	}
+	split := newLiveSplit(u)
+	u.split = split
+	return split
+}
+
+func (u *UI) clearSplit(split *LiveSplit) {
+	u.liveMu.Lock()
+	defer u.liveMu.Unlock()
+	if u.split == split {
+		u.split = nil
+	}
+}
+
+func (u *UI) currentSplit() *LiveSplit {
+	u.liveMu.Lock()
+	defer u.liveMu.Unlock()
+	return u.split
+}
+
+func (u *UI) lockWrite() {
+	u.writeMu.Lock()
+}
+
+func (u *UI) unlockWrite() {
+	u.writeMu.Unlock()
 }
 
 func icon(useColor bool, fancy string, fallback string) string {

@@ -7,17 +7,22 @@ type SSHOptions struct {
 	Host         string
 	ProxyJump    string
 	ForwardAgent bool
+	IdentityFile string
 	Command      []string
 }
 
 type SCPOptions struct {
-	ProxyJump string
-	Src       string
-	Dst       string
+	ProxyJump    string
+	IdentityFile string
+	Src          string
+	Dst          string
 }
 
 func BuildSSHArgs(opts SSHOptions) []string {
 	args := []string{}
+	if opts.IdentityFile != "" {
+		args = append(args, "-i", opts.IdentityFile)
+	}
 	if opts.ForwardAgent {
 		args = append(args, "-A")
 	}
@@ -35,6 +40,9 @@ func BuildSSHArgs(opts SSHOptions) []string {
 
 func BuildSCPArgs(opts SCPOptions) []string {
 	args := []string{}
+	if opts.IdentityFile != "" {
+		args = append(args, "-i", opts.IdentityFile)
+	}
 	if opts.ProxyJump != "" {
 		args = append(args, "-o", "ProxyJump="+opts.ProxyJump)
 	}

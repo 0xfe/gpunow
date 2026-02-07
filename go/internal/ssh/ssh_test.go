@@ -8,22 +8,24 @@ func TestBuildSSHArgs(t *testing.T) {
 		Host:         "1.2.3.4",
 		ProxyJump:    "mo@5.6.7.8",
 		ForwardAgent: true,
+		IdentityFile: "/home/mo/.ssh/id_ed25519",
 		Command:      []string{"nvidia-smi"},
 	})
 	joined := join(args)
-	if joined != "-A -J mo@5.6.7.8 mo@1.2.3.4 nvidia-smi" {
+	if joined != "-i /home/mo/.ssh/id_ed25519 -A -J mo@5.6.7.8 mo@1.2.3.4 nvidia-smi" {
 		t.Fatalf("unexpected args: %s", joined)
 	}
 }
 
 func TestBuildSCPArgs(t *testing.T) {
 	args := BuildSCPArgs(SCPOptions{
-		ProxyJump: "mo@5.6.7.8",
-		Src:       "./local.txt",
-		Dst:       "mo@1.2.3.4:/home/mo/",
+		ProxyJump:    "mo@5.6.7.8",
+		IdentityFile: "/home/mo/.ssh/id_ed25519",
+		Src:          "./local.txt",
+		Dst:          "mo@1.2.3.4:/home/mo/",
 	})
 	joined := join(args)
-	if joined != "-o ProxyJump=mo@5.6.7.8 ./local.txt mo@1.2.3.4:/home/mo/" {
+	if joined != "-i /home/mo/.ssh/id_ed25519 -o ProxyJump=mo@5.6.7.8 ./local.txt mo@1.2.3.4:/home/mo/" {
 		t.Fatalf("unexpected args: %s", joined)
 	}
 }

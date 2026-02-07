@@ -17,35 +17,32 @@ $ just build
 # Authenticate with GCP
 gcloud auth application-default login
 
-# Start a VM
-$ gpunow vm start
-✓ Created gpu0
+# Spin up a quick 3-node cluster
+$ gpunow create my-cluster -n 3 --start
+✓ Created cluster my-cluster (3 instances) in local state
 
-# See VM status
-➜ gpunow vm status
-gpu0 (default) RUNNING
-• Auto-terminating in 11h 7m (at 04:26am)
-• Zone: us-east1-d
-• Machine: g2-standard-16
-  -> api: compute.machineTypes.get projects/symbolic-axe-717/zones/us-east1-d/machineTypes/g2-standard-16
-  • CPUs: 16 (X86_64)
-  • RAM: 64 GB
-  • GPU: nvidia-l4 x1
-• External IP: 34.26.181.230
+# See status
+➜ gpunow status
 
-# SSH to VM
-$ gpunow ssh
-gpu0$ 
+# SSH to a specific instance
+$ gpunow ssh my-cluster/0
+my-cluster-0$
+
+# By defaul, all instances terminate in 12 hours, to terminate manually
+# and optionally delete all resources
+gpunow stop my-cluster [--delete] [--keep-disks]
 ```
 
 ## Prerequisites
-- Go 1.25.6 (for building).
+
 - GCP credentials with Compute Engine permissions.
 - Compute Engine API enabled and quota for the selected GPU type.
+- Go 1.25.6 (to build from source)
 
 ## Authentication (ADC)
 
 Recommended (user credentials):
+
 ```bash
 gcloud auth application-default login
 gcloud auth application-default set-quota-project <your-project-id>
@@ -63,32 +60,27 @@ Install gpunow and initialize a home profile directory:
 ./bin/gpunow install
 ```
 
-Single VM (defaults to `vm.default_name` from the config):
-```bash
-./bin/gpunow vm start
-./bin/gpunow vm status
-./bin/gpunow vm stop
-```
-
 Cluster:
 ```bash
-./bin/gpunow cluster start my-cluster -n 3
-./bin/gpunow cluster status my-cluster
-./bin/gpunow cluster update my-cluster --max-hours 24
-./bin/gpunow cluster stop my-cluster --delete
+./bin/gpunow create my-cluster -n 3
+./bin/gpunow start my-cluster
+./bin/gpunow create my-cluster -n 3 --start
+./bin/gpunow status my-cluster
+./bin/gpunow update my-cluster --max-hours 24
+./bin/gpunow stop my-cluster --delete
 ```
 
-Reference a VM inside a cluster using `<cluster>/<index>`:
+Reference a node using `<cluster>/<index>` or `<cluster>-<index>`:
 ```bash
-./bin/gpunow vm status my-cluster/0
-./bin/gpunow vm status my-cluster/2
+./bin/gpunow ssh my-cluster/0
+./bin/gpunow ssh my-cluster/2
+./bin/gpunow ssh my-cluster-2
 ```
 
 SSH and SCP:
 ```bash
 ./bin/gpunow ssh my-cluster/0
 ./bin/gpunow ssh my-cluster/2 -u mo -- nvidia-smi
-./bin/gpunow ssh            # defaults to vm.default_name
 ./bin/gpunow scp ./local.txt my-cluster/2:/home/mo/
 ./bin/gpunow scp my-cluster/0:/home/mo/logs.txt ./
 ./bin/gpunow scp -r -P 2222 ./dir my-cluster/2:/home/mo/
@@ -101,6 +93,12 @@ State:
 ./bin/gpunow state raw
 ```
 
+Status:
+```bash
+./bin/gpunow status
+./bin/gpunow status sync
+```
+
 ## Configuration
 Configuration profiles live under `profiles/<name>` and contain:
 - `config.toml`
@@ -110,7 +108,8 @@ Configuration profiles live under `profiles/<name>` and contain:
 
 The default profile is `profiles/default`. Use `-p/--profile` to select another profile:
 ```bash
-./bin/gpunow cluster start my-cluster -n 3 -p gpu-l4
+./bin/gpunow create my-cluster -n 3 -p gpu-l4
+./bin/gpunow start my-cluster -p gpu-l4
 ```
 
 ## GPUNOW_HOME, Profiles, and State
@@ -122,21 +121,22 @@ Profiles are read from `<home>/profiles`, and state is written to `<home>/state/
 Use `gpunow install` to create `~/.config/gpunow/profiles/default`.
 
 Key settings in `config.toml`:
+- Schema version (`version`)
 - Project and zone
-- VM/cluster defaults (machine type, GPU type/count, max run hours)
+- Instance defaults (machine type, GPU type/count, max run hours)
 - Network defaults and exposed ports
 - Service account and scopes
 - Disk image and size
 - Optional hostname domain for FQDN hostnames (`instance.hostname_domain`)
+ - Optional SSH identity file (`ssh.identity_file`)
 
 ## Behavior Notes
-- Each cluster gets its own VPC and subnet; all nodes are reachable internally.
-- Instance 0 is the master node and gets a public IP.
-- SSH/SCP to non-master nodes proxies through the master automatically.
-- `gpunow ssh` forwards your agent so you can hop from the master to workers.
-- `vm` commands accept either a name or a `cluster/index` target.
-- VM creation uses the configured `network.default_network`.
-- `vm start` with a `cluster/index` target only starts existing nodes; use `cluster start` to create nodes.
+- Each cluster gets its own VPC and subnet.
+- All cluster nodes get ephemeral public IPv4 addresses (destroyed with the VM).
+- `gpunow ssh` and `gpunow scp` connect directly to each node.
+- Firewall rules apply to all cluster nodes.
+- Host-level `ufw` is enabled and allows SSH (`22/tcp`) by default.
+- Network defaults control additional allowed ports when configured.
 - Hostnames: GCE requires a fully qualified domain name (FQDN) if you set `instance.hostname_domain`.
   Leave it empty to use the default internal DNS hostname derived from the instance name.
 

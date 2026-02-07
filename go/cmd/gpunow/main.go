@@ -8,7 +8,8 @@ import (
 
 func main() {
 	app := appcli.NewApp()
-	if err := app.Run(os.Args); err != nil {
+	args := appcli.NormalizeArgs(os.Args)
+	if err := app.Run(args); err != nil {
 		os.Exit(1)
 	}
 }

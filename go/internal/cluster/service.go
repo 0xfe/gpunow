@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	compute "cloud.google.com/go/compute/apiv1"
 	"cloud.google.com/go/compute/apiv1/computepb"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/iterator"
 	"google.golang.org/protobuf/proto"
 
@@ -15,6 +17,7 @@ import (
 	"gpunow/internal/config"
 	"gpunow/internal/gcp"
 	"gpunow/internal/instance"
+	"gpunow/internal/ssh"
 	"gpunow/internal/ui"
 	"gpunow/internal/validate"
 )
@@ -29,6 +32,8 @@ type Service struct {
 
 type StartOptions struct {
 	NumInstances int
+	SSHUser      string
+	SSHPublicKey string
 }
 
 type StopOptions struct {
@@ -58,6 +63,10 @@ func (s *Service) Start(ctx context.Context, clusterName string, opts StartOptio
 		return fmt.Errorf("num-instances must be >= 1")
 	}
 
+	split := s.UI.StartLiveSplit()
+	if split != nil {
+		defer split.Stop()
+	}
 	project := s.Config.Project.ID
 	zone := s.Config.Project.Zone
 	region, err := gcp.RegionFromZone(zone)
@@ -75,104 +84,195 @@ func (s *Service) Start(ctx context.Context, clusterName string, opts StartOptio
 		return err
 	}
 
-	if err := s.ensureNetwork(ctx, project, networkName); err != nil {
-		return err
-	}
-	if err := s.ensureSubnetwork(ctx, project, region, subnetName, subnetCIDR, networkURL); err != nil {
-		return err
-	}
-	if err := s.ensureFirewalls(ctx, project, networkName, subnetCIDR, clusterName); err != nil {
-		return err
-	}
+	internalRule := fmt.Sprintf("%s-internal", networkName)
+	sshRule := fmt.Sprintf("%s-ssh", networkName)
+	portsRule := fmt.Sprintf("%s-ports", networkName)
 
 	cloudInit, err := cloudinit.Render(s.Config.Paths.CloudInitFile, s.Config.Paths.SetupScript, s.Config.Paths.ZshrcFile)
 	if err != nil {
 		return err
 	}
 
-	progress := s.UI.Progress(opts.NumInstances, "Instances")
-	defer progress.Done()
+	instanceNames := make([]string, 0, opts.NumInstances)
+	for i := 0; i < opts.NumInstances; i++ {
+		instanceNames = append(instanceNames, s.instanceName(clusterName, i))
+	}
+	resourceTasks := []string{
+		fmt.Sprintf("network %s", networkName),
+		fmt.Sprintf("subnetwork %s", subnetName),
+		fmt.Sprintf("firewall %s", internalRule),
+		fmt.Sprintf("firewall %s", sshRule),
+		fmt.Sprintf("firewall %s", portsRule),
+	}
+	taskNames := append([]string{}, resourceTasks...)
+	for _, name := range instanceNames {
+		taskNames = append(taskNames, fmt.Sprintf("instance %s", name))
+	}
+	progress := s.UI.TaskList("Creating", taskNames)
+	resourceTaskCount := len(resourceTasks)
 
+	if err := s.ensureNetwork(ctx, project, networkName); err != nil {
+		progress.Stop()
+		return err
+	}
+	progress.MarkDone(0, fmt.Sprintf("Ready networks/%s", networkName))
+
+	if err := s.ensureSubnetwork(ctx, project, region, subnetName, subnetCIDR, networkURL); err != nil {
+		progress.Stop()
+		return err
+	}
+	progress.MarkDone(1, fmt.Sprintf("Ready subnetworks/%s", subnetName))
+
+	network := gcp.GlobalResource(project, "networks", networkName)
+	clusterTag := s.clusterTag(clusterName)
+	internalFirewall := &computepb.Firewall{
+		Name:         proto.String(internalRule),
+		Network:      proto.String(network),
+		Direction:    proto.String("INGRESS"),
+		TargetTags:   []string{clusterTag},
+		SourceRanges: []string{subnetCIDR},
+		Allowed: []*computepb.Allowed{
+			{IPProtocol: proto.String("tcp"), Ports: []string{"0-65535"}},
+			{IPProtocol: proto.String("udp"), Ports: []string{"0-65535"}},
+			{IPProtocol: proto.String("icmp")},
+		},
+	}
+	sshFirewall := &computepb.Firewall{
+		Name:         proto.String(sshRule),
+		Network:      proto.String(network),
+		Direction:    proto.String("INGRESS"),
+		TargetTags:   []string{clusterTag},
+		SourceRanges: []string{"0.0.0.0/0"},
+		Allowed: []*computepb.Allowed{{
+			IPProtocol: proto.String("tcp"),
+			Ports:      []string{"22"},
+		}},
+	}
+	portsFirewall := &computepb.Firewall{
+		Name:         proto.String(portsRule),
+		Network:      proto.String(network),
+		Direction:    proto.String("INGRESS"),
+		TargetTags:   []string{clusterTag},
+		SourceRanges: []string{"0.0.0.0/0"},
+		Allowed: []*computepb.Allowed{{
+			IPProtocol: proto.String("tcp"),
+			Ports:      portsToStrings(s.Config.Network.Ports),
+		}},
+	}
+	if err := s.ensureFirewall(ctx, project, internalRule, internalFirewall); err != nil {
+		progress.Stop()
+		return err
+	}
+	progress.MarkDone(2, fmt.Sprintf("Ready firewalls/%s", internalRule))
+	if err := s.ensureFirewall(ctx, project, sshRule, sshFirewall); err != nil {
+		progress.Stop()
+		return err
+	}
+	progress.MarkDone(3, fmt.Sprintf("Ready firewalls/%s", sshRule))
+	if err := s.ensureFirewall(ctx, project, portsRule, portsFirewall); err != nil {
+		progress.Stop()
+		return err
+	}
+	progress.MarkDone(4, fmt.Sprintf("Ready firewalls/%s", portsRule))
+
+	group, groupCtx := errgroup.WithContext(ctx)
 	for i := 0; i < opts.NumInstances; i++ {
 		name := s.instanceName(clusterName, i)
-		labels := map[string]string{
-			"cluster":       clusterName,
-			"cluster_index": strconv.Itoa(i),
-		}
+		clusterIndex := i
+		progressIndex := resourceTaskCount + i
 		role := "worker"
-		publicIP := false
+		publicIP := true
 		if i == 0 {
 			role = "master"
-			publicIP = true
 		}
-		labels["cluster_role"] = role
+		group.Go(func() error {
+			labels := map[string]string{
+				"cluster":       clusterName,
+				"cluster_index": strconv.Itoa(clusterIndex),
+				"cluster_role":  role,
+			}
+			metadata := map[string]string{
+				"cluster":       clusterName,
+				"cluster_index": strconv.Itoa(clusterIndex),
+				"cluster_role":  role,
+			}
+			if opts.SSHUser != "" && opts.SSHPublicKey != "" {
+				metadata["ssh-keys"] = fmt.Sprintf("%s:%s", opts.SSHUser, opts.SSHPublicKey)
+			}
+			tags := s.clusterTags(clusterName, role == "master")
 
-		metadata := map[string]string{
-			"cluster":       clusterName,
-			"cluster_index": strconv.Itoa(i),
-			"cluster_role":  role,
-		}
-
-		tags := s.clusterTags(clusterName, role == "master")
-
-		instanceObj, err := s.getInstance(ctx, name)
-		if err != nil {
-			return err
-		}
-		if instanceObj != nil {
-			if err := s.ensureInstanceTags(ctx, instanceObj, tags); err != nil {
+			instanceObj, err := s.getInstance(groupCtx, name)
+			if err != nil {
 				return err
 			}
-			if instanceObj.GetStatus() == "RUNNING" {
-				s.UI.Infof("%s is already RUNNING", name)
-				progress.Increment()
-				continue
+			if instanceObj != nil {
+				if err := s.ensureInstanceTags(groupCtx, instanceObj, tags); err != nil {
+					return err
+				}
+				if opts.SSHUser != "" && opts.SSHPublicKey != "" {
+					if err := s.ensureInstanceSSHKey(groupCtx, name, opts.SSHUser, opts.SSHPublicKey); err != nil {
+						return err
+					}
+				}
+				if instanceObj.GetStatus() == "RUNNING" {
+					progress.MarkDone(progressIndex, fmt.Sprintf("Already running %s", name))
+					return nil
+				}
+				call := s.api("compute.instances.start", gcp.ZoneResource(project, zone, "instances", name), fmt.Sprintf("Starting %s", name))
+				op, err := s.Compute.StartInstance(groupCtx, &computepb.StartInstanceRequest{
+					Project:  project,
+					Zone:     zone,
+					Instance: name,
+				})
+				if err != nil {
+					call.Stop()
+					return err
+				}
+				if err := s.waitWithProgress(groupCtx, call, op, func(p int32) { progress.Update(progressIndex, p) }); err != nil {
+					return err
+				}
+				progress.MarkDone(progressIndex, fmt.Sprintf("Started %s", name))
+				return nil
 			}
-			call := s.api("compute.instances.start", gcp.ZoneResource(project, zone, "instances", name), fmt.Sprintf("Starting %s", name))
-			op, err := s.Compute.StartInstance(ctx, &computepb.StartInstanceRequest{
-				Project:  project,
-				Zone:     zone,
-				Instance: name,
+
+			instanceReq, err := s.Builder.Build(groupCtx, s.Compute, instance.Options{
+				Name:        name,
+				Network:     networkURL,
+				Subnetwork:  subnetURL,
+				PublicIP:    publicIP,
+				Tags:        tags,
+				CloudInit:   cloudInit,
+				Labels:      labels,
+				Metadata:    metadata,
+				MaxRunHours: s.Config.Instance.MaxRunHours,
 			})
+			if err != nil {
+				return err
+			}
+			call := s.api("compute.instances.insert", gcp.ZoneResource(project, zone, "instances", name), fmt.Sprintf("Creating %s", name))
+			op, err := s.Compute.InsertInstance(groupCtx, instanceReq)
 			if err != nil {
 				call.Stop()
 				return err
 			}
-			if err := s.wait(ctx, call, op); err != nil {
+			if err := s.waitWithProgress(groupCtx, call, op, func(p int32) { progress.Update(progressIndex, p) }); err != nil {
 				return err
 			}
-			s.UI.Successf("Started %s", name)
-			progress.Increment()
-			continue
-		}
-
-		instanceReq, err := s.Builder.Build(ctx, s.Compute, instance.Options{
-			Name:        name,
-			Network:     networkURL,
-			Subnetwork:  subnetURL,
-			PublicIP:    publicIP,
-			Tags:        tags,
-			CloudInit:   cloudInit,
-			Labels:      labels,
-			Metadata:    metadata,
-			MaxRunHours: s.Config.Instance.MaxRunHours,
+			if opts.SSHUser != "" && opts.SSHPublicKey != "" {
+				if err := s.ensureInstanceSSHKey(groupCtx, name, opts.SSHUser, opts.SSHPublicKey); err != nil {
+					return err
+				}
+			}
+			progress.MarkDone(progressIndex, fmt.Sprintf("Created %s", name))
+			return nil
 		})
-		if err != nil {
-			return err
-		}
-		call := s.api("compute.instances.insert", gcp.ZoneResource(project, zone, "instances", name), fmt.Sprintf("Creating %s", name))
-		op, err := s.Compute.InsertInstance(ctx, instanceReq)
-		if err != nil {
-			call.Stop()
-			return err
-		}
-		if err := s.wait(ctx, call, op); err != nil {
-			return err
-		}
-		s.UI.Successf("Created %s", name)
-		progress.Increment()
 	}
 
+	if err := group.Wait(); err != nil {
+		progress.Stop()
+		return err
+	}
+	progress.Stop()
 	return nil
 }
 
@@ -184,11 +284,18 @@ func (s *Service) Stop(ctx context.Context, clusterName string, opts StopOptions
 		return fmt.Errorf("--keep-disks requires --delete")
 	}
 
+	split := s.UI.StartLiveSplit()
+	if split != nil {
+		defer split.Stop()
+	}
 	instances, err := s.listClusterInstances(ctx, clusterName)
 	if err != nil {
 		return err
 	}
 	if len(instances) == 0 {
+		if split != nil {
+			split.Stop()
+		}
 		s.UI.Infof("No instances found for cluster %s", clusterName)
 		return nil
 	}
@@ -200,21 +307,61 @@ func (s *Service) Stop(ctx context.Context, clusterName string, opts StopOptions
 		return err
 	}
 
-	label := "Stopping"
+	label := "Stopping instance"
+	networkName := s.clusterNetworkName(clusterName)
+	subnetName := s.clusterSubnetName(networkName)
+	extraTasks := []string{}
 	if opts.Delete {
 		label = "Deleting"
+		extraTasks = append(extraTasks,
+			fmt.Sprintf("firewalls/%s-internal", networkName),
+			fmt.Sprintf("firewalls/%s-ssh", networkName),
+			fmt.Sprintf("firewalls/%s-ports", networkName),
+			fmt.Sprintf("subnetworks/%s", subnetName),
+			fmt.Sprintf("networks/%s", networkName),
+		)
 	}
-	progress := s.UI.Progress(len(instances), label)
-	defer progress.Done()
+	taskNames := instanceNames(instances)
+	if opts.Delete {
+		for i, name := range taskNames {
+			taskNames[i] = fmt.Sprintf("instance %s", name)
+		}
+	}
+	taskNames = append(taskNames, extraTasks...)
+	progress := s.UI.TaskList(label, taskNames)
 
-	for _, inst := range instances {
+	group, groupCtx := errgroup.WithContext(ctx)
+	for idx, inst := range instances {
+		index := idx
 		name := inst.GetName()
-		if opts.Delete {
-			if err := s.setAutoDelete(ctx, name, inst, !opts.KeepDisks); err != nil {
-				return err
+		group.Go(func() error {
+			if opts.Delete {
+				if err := s.setAutoDelete(groupCtx, name, inst, !opts.KeepDisks); err != nil {
+					return err
+				}
+				call := s.api("compute.instances.delete", gcp.ZoneResource(project, zone, "instances", name), fmt.Sprintf("Deleting %s", name))
+				op, err := s.Compute.DeleteInstance(groupCtx, &computepb.DeleteInstanceRequest{
+					Project:  project,
+					Zone:     zone,
+					Instance: name,
+				})
+				if err != nil {
+					call.Stop()
+					return err
+				}
+				if err := s.waitWithProgress(groupCtx, call, op, func(p int32) { progress.Update(index, p) }); err != nil {
+					return err
+				}
+				progress.MarkDone(index, fmt.Sprintf("Deleted %s", name))
+				return nil
 			}
-			call := s.api("compute.instances.delete", gcp.ZoneResource(project, zone, "instances", name), fmt.Sprintf("Deleting %s", name))
-			op, err := s.Compute.DeleteInstance(ctx, &computepb.DeleteInstanceRequest{
+
+			if inst.GetStatus() == "TERMINATED" {
+				progress.MarkDone(index, fmt.Sprintf("Already terminated %s", name))
+				return nil
+			}
+			call := s.api("compute.instances.stop", gcp.ZoneResource(project, zone, "instances", name), fmt.Sprintf("Stopping %s", name))
+			op, err := s.Compute.StopInstance(groupCtx, &computepb.StopInstanceRequest{
 				Project:  project,
 				Zone:     zone,
 				Instance: name,
@@ -223,50 +370,87 @@ func (s *Service) Stop(ctx context.Context, clusterName string, opts StopOptions
 				call.Stop()
 				return err
 			}
-			if err := s.wait(ctx, call, op); err != nil {
+			if err := s.waitWithProgress(groupCtx, call, op, func(p int32) { progress.Update(index, p) }); err != nil {
 				return err
 			}
-			s.UI.Successf("Deleted %s", name)
-			progress.Increment()
-			continue
-		}
-
-		if inst.GetStatus() == "TERMINATED" {
-			s.UI.Infof("%s is already TERMINATED", name)
-			progress.Increment()
-			continue
-		}
-		call := s.api("compute.instances.stop", gcp.ZoneResource(project, zone, "instances", name), fmt.Sprintf("Stopping %s", name))
-		op, err := s.Compute.StopInstance(ctx, &computepb.StopInstanceRequest{
-			Project:  project,
-			Zone:     zone,
-			Instance: name,
+			progress.MarkDone(index, fmt.Sprintf("Stopped %s", name))
+			return nil
 		})
-		if err != nil {
-			call.Stop()
-			return err
-		}
-		if err := s.wait(ctx, call, op); err != nil {
-			return err
-		}
-		s.UI.Successf("Stopped %s", name)
-		progress.Increment()
+	}
+	if err := group.Wait(); err != nil {
+		progress.Stop()
+		return err
 	}
 
 	if opts.Delete {
-		networkName := s.clusterNetworkName(clusterName)
-		subnetName := s.clusterSubnetName(networkName)
-		if err := s.deleteFirewalls(ctx, project, networkName); err != nil {
-			return err
+		base := len(instances)
+		firewalls := []string{
+			fmt.Sprintf("%s-internal", networkName),
+			fmt.Sprintf("%s-ssh", networkName),
+			fmt.Sprintf("%s-ports", networkName),
 		}
-		if err := s.deleteSubnetwork(ctx, project, region, subnetName); err != nil {
-			return err
+		for i, rule := range firewalls {
+			idx := base + i
+			call := s.api("compute.firewalls.delete", gcp.GlobalResource(project, "firewalls", rule), fmt.Sprintf("Deleting firewall %s", rule))
+			op, err := s.Compute.DeleteFirewall(ctx, &computepb.DeleteFirewallRequest{
+				Project:  project,
+				Firewall: rule,
+			})
+			if err != nil {
+				call.Stop()
+				if gcp.IsNotFound(err) {
+					progress.MarkDone(idx, fmt.Sprintf("Deleted firewalls/%s", rule))
+					continue
+				}
+				return err
+			}
+			if err := s.waitWithProgress(ctx, call, op, func(p int32) { progress.Update(idx, p) }); err != nil {
+				return err
+			}
+			progress.MarkDone(idx, fmt.Sprintf("Deleted firewalls/%s", rule))
 		}
-		if err := s.deleteNetwork(ctx, project, networkName); err != nil {
-			return err
+
+		subnetIdx := base + len(firewalls)
+		call := s.api("compute.subnetworks.delete", gcp.RegionResource(project, region, "subnetworks", subnetName), fmt.Sprintf("Deleting subnetwork %s", subnetName))
+		op, err := s.Compute.DeleteSubnetwork(ctx, &computepb.DeleteSubnetworkRequest{
+			Project:    project,
+			Region:     region,
+			Subnetwork: subnetName,
+		})
+		if err != nil {
+			call.Stop()
+			if !gcp.IsNotFound(err) {
+				return err
+			}
+			progress.MarkDone(subnetIdx, fmt.Sprintf("Deleted subnetworks/%s", subnetName))
+		} else {
+			if err := s.waitWithProgress(ctx, call, op, func(p int32) { progress.Update(subnetIdx, p) }); err != nil {
+				return err
+			}
+			progress.MarkDone(subnetIdx, fmt.Sprintf("Deleted subnetworks/%s", subnetName))
+		}
+
+		networkIdx := subnetIdx + 1
+		call = s.api("compute.networks.delete", gcp.GlobalResource(project, "networks", networkName), fmt.Sprintf("Deleting network %s", networkName))
+		op, err = s.Compute.DeleteNetwork(ctx, &computepb.DeleteNetworkRequest{
+			Project: project,
+			Network: networkName,
+		})
+		if err != nil {
+			call.Stop()
+			if !gcp.IsNotFound(err) {
+				return err
+			}
+			progress.MarkDone(networkIdx, fmt.Sprintf("Deleted networks/%s", networkName))
+		} else {
+			if err := s.waitWithProgress(ctx, call, op, func(p int32) { progress.Update(networkIdx, p) }); err != nil {
+				return err
+			}
+			progress.MarkDone(networkIdx, fmt.Sprintf("Deleted networks/%s", networkName))
 		}
 	}
 
+	progress.Stop()
 	return nil
 }
 
@@ -285,16 +469,21 @@ func (s *Service) Show(ctx context.Context, clusterName string) error {
 	s.UI.Infof("Instances: %d", len(instances))
 
 	for _, inst := range instances {
-		ip := ""
+		external := ""
+		internal := ""
 		if len(inst.GetNetworkInterfaces()) > 0 {
 			iface := inst.GetNetworkInterfaces()[0]
+			internal = iface.GetNetworkIP()
 			if len(iface.GetAccessConfigs()) > 0 {
-				ip = iface.GetAccessConfigs()[0].GetNatIP()
+				external = iface.GetAccessConfigs()[0].GetNatIP()
 			}
 		}
 		line := fmt.Sprintf("%s (%s)", inst.GetName(), inst.GetStatus())
-		if ip != "" {
-			line = fmt.Sprintf("%s - %s", line, ip)
+		if external != "" {
+			line = fmt.Sprintf("%s %s", line, external)
+		}
+		if internal != "" {
+			line = fmt.Sprintf("%s [%s]", line, internal)
 		}
 		s.UI.Infof("%s", line)
 	}
@@ -310,11 +499,18 @@ func (s *Service) Update(ctx context.Context, clusterName string, opts UpdateOpt
 		return fmt.Errorf("max-hours must be >= 1")
 	}
 
+	split := s.UI.StartLiveSplit()
+	if split != nil {
+		defer split.Stop()
+	}
 	instances, err := s.listClusterInstances(ctx, clusterName)
 	if err != nil {
 		return err
 	}
 	if len(instances) == 0 {
+		if split != nil {
+			split.Stop()
+		}
 		s.UI.Infof("No instances found for cluster %s", clusterName)
 		return nil
 	}
@@ -322,29 +518,40 @@ func (s *Service) Update(ctx context.Context, clusterName string, opts UpdateOpt
 	project := s.Config.Project.ID
 	zone := s.Config.Project.Zone
 	scheduling := s.Builder.Scheduling(opts.MaxRunHours)
-
-	for _, inst := range instances {
-		if inst.GetStatus() != "TERMINATED" {
-			s.UI.Warnf("%s must be TERMINATED to update max run duration", inst.GetName())
-			continue
-		}
-		call := s.api("compute.instances.setScheduling", gcp.ZoneResource(project, zone, "instances", inst.GetName()), fmt.Sprintf("Updating scheduling for %s", inst.GetName()))
-		op, err := s.Compute.SetInstanceScheduling(ctx, &computepb.SetSchedulingInstanceRequest{
-			Project:            project,
-			Zone:               zone,
-			Instance:           inst.GetName(),
-			SchedulingResource: scheduling,
+	label := "Updating instance"
+	progress := s.UI.TaskList(label, instanceNames(instances))
+	group, groupCtx := errgroup.WithContext(ctx)
+	for idx, inst := range instances {
+		index := idx
+		name := inst.GetName()
+		group.Go(func() error {
+			if inst.GetStatus() != "TERMINATED" {
+				progress.MarkWarning(index, fmt.Sprintf("%s must be TERMINATED to update max run duration", name))
+				return nil
+			}
+			call := s.api("compute.instances.setScheduling", gcp.ZoneResource(project, zone, "instances", name), fmt.Sprintf("Updating scheduling for %s", name))
+			op, err := s.Compute.SetInstanceScheduling(groupCtx, &computepb.SetSchedulingInstanceRequest{
+				Project:            project,
+				Zone:               zone,
+				Instance:           name,
+				SchedulingResource: scheduling,
+			})
+			if err != nil {
+				call.Stop()
+				return err
+			}
+			if err := s.waitWithProgress(groupCtx, call, op, func(p int32) { progress.Update(index, p) }); err != nil {
+				return err
+			}
+			progress.MarkDone(index, fmt.Sprintf("Updated %s", name))
+			return nil
 		})
-		if err != nil {
-			call.Stop()
-			return err
-		}
-		if err := s.wait(ctx, call, op); err != nil {
-			return err
-		}
-		s.UI.Successf("Updated %s", inst.GetName())
 	}
-
+	if err := group.Wait(); err != nil {
+		progress.Stop()
+		return err
+	}
+	progress.Stop()
 	return nil
 }
 
@@ -464,7 +671,6 @@ func (s *Service) ensureFirewalls(ctx context.Context, project, networkName, cid
 
 	network := gcp.GlobalResource(project, "networks", networkName)
 	clusterTag := s.clusterTag(clusterName)
-	masterTag := s.masterTag(clusterName)
 
 	internalFirewall := &computepb.Firewall{
 		Name:         proto.String(internalRule),
@@ -483,7 +689,7 @@ func (s *Service) ensureFirewalls(ctx context.Context, project, networkName, cid
 		Name:         proto.String(sshRule),
 		Network:      proto.String(network),
 		Direction:    proto.String("INGRESS"),
-		TargetTags:   []string{masterTag},
+		TargetTags:   []string{clusterTag},
 		SourceRanges: []string{"0.0.0.0/0"},
 		Allowed: []*computepb.Allowed{{
 			IPProtocol: proto.String("tcp"),
@@ -495,7 +701,7 @@ func (s *Service) ensureFirewalls(ctx context.Context, project, networkName, cid
 		Name:         proto.String(portsRule),
 		Network:      proto.String(network),
 		Direction:    proto.String("INGRESS"),
-		TargetTags:   []string{masterTag},
+		TargetTags:   []string{clusterTag},
 		SourceRanges: []string{"0.0.0.0/0"},
 		Allowed: []*computepb.Allowed{{
 			IPProtocol: proto.String("tcp"),
@@ -675,6 +881,41 @@ func (s *Service) wait(ctx context.Context, call *ui.APICall, op *compute.Operat
 	return err
 }
 
+func (s *Service) waitWithProgress(ctx context.Context, call *ui.APICall, op *compute.Operation, update func(int32)) error {
+	ticker := time.NewTicker(800 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if err := op.Poll(ctx); err != nil {
+			if call != nil {
+				call.Stop()
+			}
+			return err
+		}
+		if update != nil {
+			update(op.Proto().GetProgress())
+		}
+		if op.Done() {
+			if call != nil {
+				call.Stop()
+			}
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			if call != nil {
+				call.Stop()
+			}
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Service) ensureInstanceSSHKey(ctx context.Context, name, user, publicKey string) error {
+	return ssh.EnsureInstanceSSHKey(ctx, s.Compute, s.Config, name, user, publicKey)
+}
+
 func (s *Service) clusterNetworkName(clusterName string) string {
 	return fmt.Sprintf("%s-%s", s.Config.Cluster.NetworkNamePrefix, clusterName)
 }
@@ -710,6 +951,17 @@ func portsToStrings(ports []int) []string {
 		out = append(out, strconv.Itoa(port))
 	}
 	return out
+}
+
+func instanceNames(instances []*computepb.Instance) []string {
+	names := make([]string, 0, len(instances))
+	for _, inst := range instances {
+		if inst == nil {
+			continue
+		}
+		names = append(names, inst.GetName())
+	}
+	return names
 }
 
 func containsAll(existing []string, required []string) bool {

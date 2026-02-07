@@ -10,11 +10,11 @@ require (
 	github.com/googleapis/gax-go/v2 v2.16.0
 	github.com/mattn/go-isatty v0.0.20
 	github.com/urfave/cli/v2 v2.27.7
-	github.com/vbauerster/mpb/v8 v8.11.3
 	go.uber.org/zap v1.27.1
 	google.golang.org/api v0.265.0
 	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.11
+	golang.org/x/sync v0.19.0
 )
 
 require (

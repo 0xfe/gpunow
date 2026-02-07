@@ -1,27 +1,30 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/urfave/cli/v2"
 
 	"gpunow/internal/cluster"
-	"gpunow/internal/parse"
+	"gpunow/internal/config"
+	"gpunow/internal/gcp"
 	"gpunow/internal/ssh"
 	"gpunow/internal/target"
 	"gpunow/internal/version"
-	"gpunow/internal/vm"
 )
 
 func NewApp() *cli.App {
 	app := &cli.App{
-		Name:    "gpunow",
-		Usage:   "Manage GPU VMs and clusters on GCP",
-		Version: version.Version,
+		Name:                   "gpunow",
+		Usage:                  "Manage GPU clusters on GCP",
+		Version:                version.Version,
+		UseShortOptionHandling: true,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "profile",
@@ -38,10 +41,13 @@ func NewApp() *cli.App {
 		},
 		Commands: []*cli.Command{
 			installCommand(),
-			vmCommand(),
-			clusterCommand(),
+			createCommand(),
+			startCommand(),
+			stopCommand(),
+			updateCommand(),
 			sshCommand(),
 			scpCommand(),
+			statusCommand(),
 			stateCommand(),
 			versionCommand(),
 		},
@@ -55,100 +61,61 @@ func NewApp() *cli.App {
 	return app
 }
 
-func vmCommand() *cli.Command {
+func createCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "vm",
-		Usage: "Manage single VM instances",
-		Subcommands: []*cli.Command{
-			{
-				Name:      "start",
-				Usage:     "Start a VM (optionally by name or cluster/index)",
-				ArgsUsage: "[name or cluster/index]",
-				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "ports", Usage: "Comma-separated ports to allow"},
-					&cli.IntFlag{Name: "max-hours", Usage: "Max run duration in hours"},
-				},
-				Action: vmStart,
-			},
-			{
-				Name:      "stop",
-				Usage:     "Stop or delete a VM",
-				ArgsUsage: "[name or cluster/index]",
-				Flags: []cli.Flag{
-					&cli.BoolFlag{Name: "delete", Usage: "Delete the instance"},
-					&cli.BoolFlag{Name: "keep-disks", Usage: "Preserve disks when deleting"},
-				},
-				Action: vmStop,
-			},
-			{
-				Name:      "status",
-				Aliases:   []string{"show"},
-				Usage:     "Show VM status",
-				ArgsUsage: "[name or cluster/index]",
-				Action:    vmStatus,
-			},
-			{
-				Name:      "update",
-				Usage:     "Update VM settings",
-				ArgsUsage: "[name or cluster/index]",
-				Flags: []cli.Flag{
-					&cli.IntFlag{Name: "max-hours", Usage: "Max run duration in hours"},
-				},
-				Action: vmUpdate,
-			},
+		Name:      "create",
+		Usage:     "Create a cluster",
+		ArgsUsage: "<cluster>",
+		Flags: []cli.Flag{
+			&cli.IntFlag{Name: "num-instances", Aliases: []string{"n"}, Usage: "Number of instances"},
+			&cli.BoolFlag{Name: "start", Usage: "Start the cluster after creating it"},
 		},
+		Action: createCluster,
 	}
 }
 
-func clusterCommand() *cli.Command {
+func startCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "cluster",
-		Usage: "Manage GPU clusters",
-		Subcommands: []*cli.Command{
-			{
-				Name:      "start",
-				Usage:     "Start a cluster",
-				ArgsUsage: "<cluster>",
-				Flags: []cli.Flag{
-					&cli.IntFlag{Name: "num-instances", Aliases: []string{"n"}, Usage: "Number of instances"},
-				},
-				Action: clusterStart,
-			},
-			{
-				Name:      "stop",
-				Usage:     "Stop or delete a cluster",
-				ArgsUsage: "<cluster>",
-				Flags: []cli.Flag{
-					&cli.BoolFlag{Name: "delete", Usage: "Delete instances"},
-					&cli.BoolFlag{Name: "keep-disks", Usage: "Preserve disks when deleting"},
-				},
-				Action: clusterStop,
-			},
-			{
-				Name:      "status",
-				Aliases:   []string{"show"},
-				Usage:     "Show cluster status",
-				ArgsUsage: "<cluster>",
-				Action:    clusterStatus,
-			},
-			{
-				Name:      "update",
-				Usage:     "Update cluster settings",
-				ArgsUsage: "<cluster>",
-				Flags: []cli.Flag{
-					&cli.IntFlag{Name: "max-hours", Usage: "Max run duration in hours"},
-				},
-				Action: clusterUpdate,
-			},
+		Name:      "start",
+		Usage:     "Start a cluster",
+		ArgsUsage: "<cluster>",
+		Flags: []cli.Flag{
+			&cli.IntFlag{Name: "num-instances", Aliases: []string{"n"}, Usage: "Number of instances (required to create new clusters)"},
 		},
+		Action: startCluster,
+	}
+}
+
+func stopCommand() *cli.Command {
+	return &cli.Command{
+		Name:      "stop",
+		Usage:     "Stop or delete a cluster",
+		ArgsUsage: "<cluster>",
+		Flags: []cli.Flag{
+			&cli.BoolFlag{Name: "delete", Usage: "Delete instances"},
+			&cli.BoolFlag{Name: "keep-disks", Usage: "Preserve disks when deleting"},
+		},
+		Action: stopCluster,
+	}
+}
+
+func updateCommand() *cli.Command {
+	return &cli.Command{
+		Name:      "update",
+		Usage:     "Update cluster settings",
+		ArgsUsage: "<cluster>",
+		Flags: []cli.Flag{
+			&cli.IntFlag{Name: "max-hours", Usage: "Max run duration in hours"},
+		},
+		Action: updateCluster,
 	}
 }
 
 func sshCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "ssh",
-		Usage:     "SSH into a VM or cluster node",
-		ArgsUsage: "[target]",
+		Usage:     "SSH into a cluster node",
+		ArgsUsage: "<cluster/index>",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "user", Aliases: []string{"u"}, Usage: "SSH username"},
 		},
@@ -159,7 +126,7 @@ func sshCommand() *cli.Command {
 func scpCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "scp",
-		Usage:     "SCP files to/from a cluster VM",
+		Usage:     "SCP files to/from a cluster node",
 		ArgsUsage: "<src> <dst>",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "user", Aliases: []string{"u"}, Usage: "SSH username"},
@@ -179,142 +146,55 @@ func versionCommand() *cli.Command {
 	}
 }
 
-func vmStart(c *cli.Context) error {
+func createCluster(c *cli.Context) error {
 	state, err := GetState(c)
 	if err != nil {
 		return err
 	}
-	targetRef, err := resolveVMTarget(c, state)
+	clusterName, err := requireArgWithHelp(c, 0, "cluster name")
 	if err != nil {
 		return err
 	}
-	name := targetRef.Name
+	numInstances, numInstancesExplicit, err := parseNumInstancesValue(c)
+	if err != nil {
+		return usageError(c, err.Error())
+	}
+	if !numInstancesExplicit || numInstances <= 0 {
+		return usageError(c, "--num-instances must be a positive integer")
+	}
+	startNow := c.Bool("start") || hasBoolArg(c.Args().Slice(), "start")
+	if startNow {
+		return createAndStartCluster(c, state, clusterName, numInstances)
+	}
 	announce(state)
+	if state.State != nil {
+		if err := state.State.RecordClusterCreate(clusterName, state.Profile, numInstances, time.Now()); err != nil {
+			state.UI.Warnf("Failed to update state: %v", err)
+		} else {
+			state.UI.Successf("Created cluster %s (%d instances) in local state", clusterName, numInstances)
+		}
+		return nil
+	}
+	state.UI.Successf("Created cluster %s (%d instances)", clusterName, numInstances)
+	return nil
+}
 
-	compute, err := state.ComputeClient(c.Context)
+func createAndStartCluster(c *cli.Context, state *State, clusterName string, numInstances int) error {
+	selection, err := resolveSSHSelection(state)
 	if err != nil {
 		return err
 	}
+	user := strings.TrimSpace(state.Config.SSH.DefaultUser)
+	if selection != nil && selection.Key != "" && user == "" {
+		return fmt.Errorf("ssh.default_user is required to set ssh keys")
+	}
+	announceWithKey(state, selection, true)
 
-	ports := []int{}
-	if c.IsSet("ports") {
-		ports, err = parse.PortsCSV(c.String("ports"))
-		if err != nil {
-			return err
+	if state.State != nil {
+		if err := state.State.RecordClusterCreate(clusterName, state.Profile, numInstances, time.Now()); err != nil {
+			state.UI.Warnf("Failed to update state: %v", err)
 		}
 	}
-
-	maxHours := state.Config.Instance.MaxRunHours
-	maxHoursSet := false
-	if c.IsSet("max-hours") {
-		maxHours = c.Int("max-hours")
-		maxHoursSet = true
-		if maxHours <= 0 {
-			return fmt.Errorf("--max-hours must be a positive integer")
-		}
-	}
-
-	service := vm.NewService(compute, state.Config, state.UI, state.Logger)
-	return service.Start(c.Context, name, vm.StartOptions{
-		Ports:         ports,
-		MaxRunHours:   maxHours,
-		MaxHoursSet:   maxHoursSet,
-		AllowCreate:   !targetRef.IsCluster,
-		SkipFirewall:  targetRef.IsCluster,
-		SkipTagUpdate: targetRef.IsCluster,
-	})
-}
-
-func vmStop(c *cli.Context) error {
-	state, err := GetState(c)
-	if err != nil {
-		return err
-	}
-	targetRef, err := resolveVMTarget(c, state)
-	if err != nil {
-		return err
-	}
-	name := targetRef.Name
-	announce(state)
-
-	if !c.Bool("delete") && c.Bool("keep-disks") {
-		return fmt.Errorf("--keep-disks requires --delete")
-	}
-
-	compute, err := state.ComputeClient(c.Context)
-	if err != nil {
-		return err
-	}
-
-	service := vm.NewService(compute, state.Config, state.UI, state.Logger)
-	return service.Stop(c.Context, name, vm.StopOptions{
-		Delete:    c.Bool("delete"),
-		KeepDisks: c.Bool("keep-disks"),
-	})
-}
-
-func vmStatus(c *cli.Context) error {
-	state, err := GetState(c)
-	if err != nil {
-		return err
-	}
-	targetRef, err := resolveVMTarget(c, state)
-	if err != nil {
-		return err
-	}
-	name := targetRef.Name
-	announce(state)
-
-	compute, err := state.ComputeClient(c.Context)
-	if err != nil {
-		return err
-	}
-
-	service := vm.NewService(compute, state.Config, state.UI, state.Logger)
-	return service.Show(c.Context, name)
-}
-
-func vmUpdate(c *cli.Context) error {
-	state, err := GetState(c)
-	if err != nil {
-		return err
-	}
-	targetRef, err := resolveVMTarget(c, state)
-	if err != nil {
-		return err
-	}
-	name := targetRef.Name
-	announce(state)
-
-	if !c.IsSet("max-hours") {
-		return fmt.Errorf("--max-hours is required for update")
-	}
-	if c.Int("max-hours") <= 0 {
-		return fmt.Errorf("--max-hours must be a positive integer")
-	}
-
-	compute, err := state.ComputeClient(c.Context)
-	if err != nil {
-		return err
-	}
-
-	service := vm.NewService(compute, state.Config, state.UI, state.Logger)
-	return service.Update(c.Context, name, vm.UpdateOptions{MaxRunHours: c.Int("max-hours")})
-}
-
-func clusterStart(c *cli.Context) error {
-	state, err := GetState(c)
-	if err != nil {
-		return err
-	}
-	clusterName, err := requireArg(c, 0, "cluster name")
-	if err != nil {
-		return err
-	}
-	if !c.IsSet("num-instances") || c.Int("num-instances") <= 0 {
-		return fmt.Errorf("--num-instances must be a positive integer")
-	}
-	announce(state)
 
 	compute, err := state.ComputeClient(c.Context)
 	if err != nil {
@@ -322,29 +202,100 @@ func clusterStart(c *cli.Context) error {
 	}
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
-	if err := service.Start(c.Context, clusterName, cluster.StartOptions{NumInstances: c.Int("num-instances")}); err != nil {
+	if err := service.Start(c.Context, clusterName, cluster.StartOptions{
+		NumInstances: numInstances,
+		SSHUser:      user,
+		SSHPublicKey: selectionKey(selection),
+	}); err != nil {
 		return err
 	}
 	if state.State != nil {
-		if err := state.State.RecordClusterStart(clusterName, state.Profile, c.Int("num-instances"), time.Now()); err != nil {
+		if err := state.State.RecordClusterStart(clusterName, state.Profile, numInstances, time.Now()); err != nil {
 			state.UI.Warnf("Failed to update state: %v", err)
 		}
 	}
 	return nil
 }
 
-func clusterStop(c *cli.Context) error {
+func startCluster(c *cli.Context) error {
 	state, err := GetState(c)
 	if err != nil {
 		return err
 	}
-	clusterName, err := requireArg(c, 0, "cluster name")
+	clusterName, err := requireArgWithHelp(c, 0, "cluster name")
+	if err != nil {
+		return err
+	}
+	numInstances, numInstancesExplicit, err := parseNumInstancesValue(c)
+	if err != nil {
+		return usageError(c, err.Error())
+	}
+	if numInstancesExplicit && numInstances <= 0 {
+		return usageError(c, "--num-instances must be a positive integer")
+	}
+	var clusterEntryNumInstances int
+	if state.State != nil {
+		data, err := state.State.Load()
+		if err != nil {
+			return err
+		}
+		entry := data.Clusters[clusterName]
+		if entry == nil {
+			return usageError(c, fmt.Sprintf("cluster %s not found in state; run `gpunow create %s -n <num>` first", clusterName, clusterName))
+		}
+		clusterEntryNumInstances = entry.NumInstances
+	}
+	if !numInstancesExplicit {
+		numInstances = clusterEntryNumInstances
+		if numInstances <= 0 {
+			return usageError(c, fmt.Sprintf("cluster %s has no instance count in state; run `gpunow create %s -n <num>`", clusterName, clusterName))
+		}
+	}
+	selection, err := resolveSSHSelection(state)
+	if err != nil {
+		return err
+	}
+	user := strings.TrimSpace(state.Config.SSH.DefaultUser)
+	if selection != nil && selection.Key != "" && user == "" {
+		return fmt.Errorf("ssh.default_user is required to set ssh keys")
+	}
+	announceWithKey(state, selection, true)
+
+	compute, err := state.ComputeClient(c.Context)
+	if err != nil {
+		return err
+	}
+
+	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
+	if err := service.Start(c.Context, clusterName, cluster.StartOptions{
+		NumInstances: numInstances,
+		SSHUser:      user,
+		SSHPublicKey: selectionKey(selection),
+	}); err != nil {
+		return err
+	}
+	if state.State != nil {
+		if err := state.State.RecordClusterStart(clusterName, state.Profile, numInstances, time.Now()); err != nil {
+			state.UI.Warnf("Failed to update state: %v", err)
+		}
+	}
+	return nil
+}
+
+func stopCluster(c *cli.Context) error {
+	state, err := GetState(c)
+	if err != nil {
+		return err
+	}
+	clusterName, err := requireArgWithHelp(c, 0, "cluster name")
 	if err != nil {
 		return err
 	}
 	announce(state)
-	if !c.Bool("delete") && c.Bool("keep-disks") {
-		return fmt.Errorf("--keep-disks requires --delete")
+	deleteFlag := c.Bool("delete") || hasBoolArg(c.Args().Slice(), "delete")
+	keepDisks := c.Bool("keep-disks") || hasBoolArg(c.Args().Slice(), "keep-disks")
+	if !deleteFlag && keepDisks {
+		return usageError(c, "--keep-disks requires --delete")
 	}
 
 	compute, err := state.ComputeClient(c.Context)
@@ -354,50 +305,39 @@ func clusterStop(c *cli.Context) error {
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
 	if err := service.Stop(c.Context, clusterName, cluster.StopOptions{
-		Delete:    c.Bool("delete"),
-		KeepDisks: c.Bool("keep-disks"),
+		Delete:    deleteFlag,
+		KeepDisks: keepDisks,
 	}); err != nil {
 		return err
 	}
 	if state.State != nil {
-		if err := state.State.RecordClusterStop(clusterName, c.Bool("delete"), time.Now()); err != nil {
+		if deleteFlag {
+			if err := state.State.DeleteCluster(clusterName); err != nil {
+				state.UI.Warnf("Failed to update state: %v", err)
+			}
+		} else if err := state.State.RecordClusterStop(clusterName, deleteFlag, time.Now()); err != nil {
 			state.UI.Warnf("Failed to update state: %v", err)
 		}
 	}
 	return nil
 }
 
-func clusterStatus(c *cli.Context) error {
+func updateCluster(c *cli.Context) error {
 	state, err := GetState(c)
 	if err != nil {
 		return err
 	}
-	clusterName, err := requireArg(c, 0, "cluster name")
+	clusterName, err := requireArgWithHelp(c, 0, "cluster name")
 	if err != nil {
 		return err
 	}
 	announce(state)
-	compute, err := state.ComputeClient(c.Context)
+	maxHours, maxHoursExplicit, err := parseMaxHoursValue(c)
 	if err != nil {
-		return err
+		return usageError(c, err.Error())
 	}
-
-	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
-	return service.Show(c.Context, clusterName)
-}
-
-func clusterUpdate(c *cli.Context) error {
-	state, err := GetState(c)
-	if err != nil {
-		return err
-	}
-	clusterName, err := requireArg(c, 0, "cluster name")
-	if err != nil {
-		return err
-	}
-	announce(state)
-	if !c.IsSet("max-hours") || c.Int("max-hours") <= 0 {
-		return fmt.Errorf("--max-hours must be a positive integer")
+	if !maxHoursExplicit || maxHours <= 0 {
+		return usageError(c, "--max-hours must be a positive integer")
 	}
 
 	compute, err := state.ComputeClient(c.Context)
@@ -406,7 +346,7 @@ func clusterUpdate(c *cli.Context) error {
 	}
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
-	if err := service.Update(c.Context, clusterName, cluster.UpdateOptions{MaxRunHours: c.Int("max-hours")}); err != nil {
+	if err := service.Update(c.Context, clusterName, cluster.UpdateOptions{MaxRunHours: maxHours}); err != nil {
 		return err
 	}
 	if state.State != nil {
@@ -422,13 +362,10 @@ func sshAction(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	targetRaw := c.Args().Get(0)
-	targetProvided := targetRaw != ""
-	if !targetProvided {
-		targetRaw = state.Config.VM.DefaultName
+	targetRaw, err := requireArgWithHelp(c, 0, "target")
+	if err != nil {
+		return err
 	}
-	announce(state)
-
 	user := c.String("user")
 	if user == "" {
 		user = state.Config.SSH.DefaultUser
@@ -436,28 +373,51 @@ func sshAction(c *cli.Context) error {
 	if user == "" {
 		return fmt.Errorf("ssh user is required (set --user or ssh.default_user)")
 	}
+	selection, err := resolveSSHSelection(state)
+	if err != nil {
+		return err
+	}
+	if selection != nil && selection.Key != "" && strings.TrimSpace(user) == "" {
+		return fmt.Errorf("ssh.default_user is required to set ssh keys")
+	}
+	announceWithKey(state, selection, true)
 
 	compute, err := state.ComputeClient(c.Context)
 	if err != nil {
 		return err
 	}
 
-	resolved, err := ssh.ResolveTarget(c.Context, compute, state.Config, targetRaw)
+	targetSpec, err := target.Parse(targetRaw)
+	if err != nil {
+		return err
+	}
+	if !targetSpec.IsCluster {
+		return fmt.Errorf("target must be cluster/index (foo/0 or foo-0)")
+	}
+
+	resolved, err := ssh.ResolveClusterTarget(c.Context, compute, state.Config, targetRaw)
 	if err != nil {
 		return err
 	}
 
-	proxy := ""
-	if resolved.Index > 0 {
-		proxy = ssh.FormatUserHost(user, resolved.MasterPublicIP)
+	publicKey := selectionKey(selection)
+	if publicKey != "" {
+		if err := ensureSSHKeysForTarget(c.Context, compute, state.Config, user, publicKey, targetSpec); err != nil {
+			return err
+		}
 	}
 
-	commandArgs := sshCommandArgs(c.Args().Slice(), targetProvided)
+	commandArgs := sshCommandArgs(c.Args().Slice(), true)
+	identityFile := ""
+	if selection != nil {
+		identityFile = selection.IdentityPath
+	}
 	args := ssh.BuildSSHArgs(ssh.SSHOptions{
 		User:         user,
 		Host:         resolved.Host,
-		ProxyJump:    proxy,
+		ProxyJump:    "",
 		ForwardAgent: true,
+		IdentityFile: identityFile,
 		Command:      commandArgs,
 	})
 
@@ -474,8 +434,6 @@ func scpAction(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	announce(state)
-
 	user := c.String("user")
 	if user == "" {
 		user = state.Config.SSH.DefaultUser
@@ -483,6 +441,14 @@ func scpAction(c *cli.Context) error {
 	if user == "" {
 		return fmt.Errorf("scp user is required (set --user or ssh.default_user)")
 	}
+	selection, err := resolveSSHSelection(state)
+	if err != nil {
+		return err
+	}
+	if selection != nil && selection.Key != "" && strings.TrimSpace(user) == "" {
+		return fmt.Errorf("ssh.default_user is required to set ssh keys")
+	}
+	announceWithKey(state, selection, true)
 
 	flags, srcArg, dstArg, err := parseScpArgs(c.Args().Slice())
 	if err != nil {
@@ -510,17 +476,19 @@ func scpAction(c *cli.Context) error {
 		return err
 	}
 
-	var proxy string
 	var src string
 	var dst string
+	publicKey := selectionKey(selection)
 
 	if srcSpec.IsRemote {
 		resolved, err := ssh.ResolveClusterTarget(c.Context, compute, state.Config, srcSpec.Target.Raw)
 		if err != nil {
 			return err
 		}
-		if resolved.Index > 0 {
-			proxy = ssh.FormatUserHost(user, resolved.MasterPublicIP)
+		if publicKey != "" {
+			if err := ensureSSHKeysForTarget(c.Context, compute, state.Config, user, publicKey, srcSpec.Target); err != nil {
+				return err
+			}
 		}
 		src = fmt.Sprintf("%s:%s", ssh.FormatUserHost(user, resolved.Host), ssh.NormalizePath(srcSpec.Path))
 		dst = dstArg
@@ -529,18 +497,25 @@ func scpAction(c *cli.Context) error {
 		if err != nil {
 			return err
 		}
-		if resolved.Index > 0 {
-			proxy = ssh.FormatUserHost(user, resolved.MasterPublicIP)
+		if publicKey != "" {
+			if err := ensureSSHKeysForTarget(c.Context, compute, state.Config, user, publicKey, dstSpec.Target); err != nil {
+				return err
+			}
 		}
 		src = srcArg
 		dst = fmt.Sprintf("%s:%s", ssh.FormatUserHost(user, resolved.Host), ssh.NormalizePath(dstSpec.Path))
 	}
 
+	identityFile := ""
+	if selection != nil {
+		identityFile = selection.IdentityPath
+	}
 	args := append([]string{}, flags...)
 	args = append(args, ssh.BuildSCPArgs(ssh.SCPOptions{
-		ProxyJump: proxy,
-		Src:       src,
-		Dst:       dst,
+		ProxyJump:    "",
+		IdentityFile: identityFile,
+		Src:          src,
+		Dst:          dst,
 	})...)
 
 	state.UI.Detailf(1, "cmd: %s", formatCommand("scp", args))
@@ -551,16 +526,60 @@ func scpAction(c *cli.Context) error {
 	return cmd.Run()
 }
 
-func resolveVMTarget(c *cli.Context, state *State) (target.Target, error) {
-	if c.Args().Len() == 0 {
-		return target.Target{Raw: state.Config.VM.DefaultName, Name: state.Config.VM.DefaultName}, nil
-	}
-	raw := c.Args().First()
-	parsed, err := target.Parse(raw)
+func resolveSSHSelection(state *State) (*ssh.PublicKeySelection, error) {
+	selection, err := ssh.ResolvePublicKeySelection(state.Config.SSH.IdentityFile)
 	if err != nil {
-		return target.Target{}, err
+		return nil, err
 	}
-	return parsed, nil
+	return selection, nil
+}
+
+func selectionKey(selection *ssh.PublicKeySelection) string {
+	if selection == nil {
+		return ""
+	}
+	return selection.Key
+}
+
+func ensureSSHKeysForTarget(ctx context.Context, compute gcp.Compute, cfg *config.Config, user string, publicKey string, targetSpec target.Target) error {
+	if publicKey == "" {
+		return nil
+	}
+	if err := ssh.EnsureInstanceSSHKey(ctx, compute, cfg, targetSpec.Name, user, publicKey); err != nil {
+		return fmt.Errorf("ensure ssh key on %s: %w", targetSpec.Name, err)
+	}
+	return nil
+}
+
+func requireArgWithHelp(c *cli.Context, index int, label string) (string, error) {
+	value, err := requireArg(c, index, label)
+	if err != nil {
+		showCommandUsage(c)
+	}
+	return value, err
+}
+
+func usageError(c *cli.Context, msg string) error {
+	showCommandUsage(c)
+	return fmt.Errorf("%s", msg)
+}
+
+func showCommandUsage(c *cli.Context) {
+	if c == nil || c.Command == nil {
+		return
+	}
+	origWriter := c.App.Writer
+	if c.App.ErrWriter != nil {
+		c.App.Writer = c.App.ErrWriter
+		defer func() { c.App.Writer = origWriter }()
+	}
+	if err := cli.ShowCommandHelp(c, c.Command.Name); err == nil {
+		return
+	}
+	if err := cli.ShowSubcommandHelp(c); err == nil {
+		return
+	}
+	_ = cli.ShowAppHelp(c)
 }
 
 func requireArg(c *cli.Context, index int, label string) (string, error) {
@@ -572,4 +591,64 @@ func requireArg(c *cli.Context, index int, label string) (string, error) {
 		return "", fmt.Errorf("%s is required", label)
 	}
 	return value, nil
+}
+
+func hasBoolArg(args []string, name string) bool {
+	flag := "--" + name
+	for _, arg := range args {
+		if arg == flag {
+			return true
+		}
+	}
+	return false
+}
+
+func parseNumInstancesValue(c *cli.Context) (int, bool, error) {
+	if c.IsSet("num-instances") {
+		return c.Int("num-instances"), true, nil
+	}
+	return parseIntFlagFromArgs(c.Args().Slice(), "-n", "--num-instances", "--num-instances must be a positive integer")
+}
+
+func parseMaxHoursValue(c *cli.Context) (int, bool, error) {
+	if c.IsSet("max-hours") {
+		return c.Int("max-hours"), true, nil
+	}
+	return parseIntFlagFromArgs(c.Args().Slice(), "", "--max-hours", "--max-hours must be a positive integer")
+}
+
+func parseIntFlagFromArgs(args []string, shortFlag string, longFlag string, errMsg string) (int, bool, error) {
+	found := false
+	value := 0
+	for idx := 0; idx < len(args); idx++ {
+		arg := args[idx]
+		switch {
+		case arg == shortFlag || arg == longFlag:
+			if idx+1 >= len(args) {
+				return 0, true, fmt.Errorf("%s", errMsg)
+			}
+			parsed, err := strconv.Atoi(args[idx+1])
+			if err != nil {
+				return 0, true, fmt.Errorf("%s", errMsg)
+			}
+			found = true
+			value = parsed
+			idx++
+		case strings.HasPrefix(arg, longFlag+"="):
+			parsed, err := strconv.Atoi(strings.TrimPrefix(arg, longFlag+"="))
+			if err != nil {
+				return 0, true, fmt.Errorf("%s", errMsg)
+			}
+			found = true
+			value = parsed
+		case shortFlag != "" && strings.HasPrefix(arg, shortFlag) && len(arg) > len(shortFlag):
+			parsed, err := strconv.Atoi(arg[len(shortFlag):])
+			if err != nil {
+				return 0, true, fmt.Errorf("%s", errMsg)
+			}
+			found = true
+			value = parsed
+		}
+	}
+	return value, found, nil
 }

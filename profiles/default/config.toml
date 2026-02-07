@@ -1,5 +1,6 @@
 # gpunow configuration (default profile)
 # This file is intentionally structured for extensibility.
+version = 2
 
 [project]
 id = "symbolic-axe-717"
@@ -12,10 +13,6 @@ network_name_prefix = "gpunow"
 # CIDR and prefix length using a hash of the cluster name.
 subnet_cidr_base = "10.200.0.0/16"
 subnet_prefix = 24
-
-[vm]
-# Default name used for single-VM commands when no name is provided.
-default_name = "gpu0"
 
 [instance]
 machine_type = "g2-standard-16"
@@ -33,7 +30,7 @@ hostname_domain = "mo.town"
 default_network = "default"
 stack_type = "IPV4_ONLY"
 network_tier = "PREMIUM"
-ports = [22, 80, 443, 8000]
+ports = [22]
 tags_base = ["http-server", "https-server", "lb-health-check"]
 
 [gpu]
@@ -75,6 +72,9 @@ affinity = "none"
 [ssh]
 # Default SSH username used for gpunow ssh/scp when -u is not provided.
 default_user = "mo"
+# Optional: specify an SSH identity file. If unset, gpunow will use
+# ~/.ssh/google_compute_engine when it exists.
+identity_file = ""
 
 [files]
 cloud_init = "cloud-init.yaml"

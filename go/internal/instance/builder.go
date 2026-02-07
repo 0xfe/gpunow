@@ -10,6 +10,7 @@ import (
 
 	"gpunow/internal/config"
 	"gpunow/internal/gcp"
+	"gpunow/internal/labels"
 )
 
 type Builder struct {
@@ -50,7 +51,9 @@ func (b *Builder) Build(ctx context.Context, compute gcp.Compute, opts Options) 
 		maxHours = b.Config.Instance.MaxRunHours
 	}
 
-	disk, err := b.buildBootDisk(ctx, compute, opts.Name)
+	mergedLabels := labels.EnsureManaged(mergeLabels(b.Config.Labels, opts.Labels))
+
+	disk, err := b.buildBootDisk(ctx, compute, opts.Name, mergedLabels)
 	if err != nil {
 		return nil, err
 	}
@@ -65,8 +68,8 @@ func (b *Builder) Build(ctx context.Context, compute gcp.Compute, opts Options) 
 		tags = append([]string{}, b.Config.Network.TagsBase...)
 	}
 
-	labels := mergeLabels(b.Config.Labels, opts.Labels)
-	metadataItems := buildMetadataItems(b.Config.Metadata, opts.Metadata, opts.CloudInit)
+	metadata := mergeMetadata(b.Config.Metadata, opts.Metadata)
+	metadataItems := buildMetadataItems(metadata, opts.CloudInit)
 
 	iface := &computepb.NetworkInterface{
 		Network:   proto.String(opts.Network),
@@ -112,7 +115,7 @@ func (b *Builder) Build(ctx context.Context, compute gcp.Compute, opts Options) 
 			EnableVtpm:                proto.Bool(b.Config.Shielded.VTPM),
 			EnableIntegrityMonitoring: proto.Bool(b.Config.Shielded.IntegrityMonitoring),
 		},
-		Labels: labels,
+		Labels: mergedLabels,
 		ReservationAffinity: &computepb.ReservationAffinity{
 			ConsumeReservationType: proto.String(reservationAffinityType(b.Config.Reservation.Affinity)),
 		},
@@ -153,7 +156,7 @@ func (b *Builder) buildScheduling(maxHours int) *computepb.Scheduling {
 	}
 }
 
-func (b *Builder) buildBootDisk(ctx context.Context, compute gcp.Compute, name string) (*computepb.AttachedDisk, error) {
+func (b *Builder) buildBootDisk(ctx context.Context, compute gcp.Compute, name string, diskLabels map[string]string) (*computepb.AttachedDisk, error) {
 	project := b.Config.Project.ID
 	zone := b.Config.Project.Zone
 
@@ -182,6 +185,9 @@ func (b *Builder) buildBootDisk(ctx context.Context, compute gcp.Compute, name s
 		DiskSizeGb:  proto.Int64(int64(b.Config.Disk.SizeGB)),
 		DiskType:    proto.String(diskType),
 		SourceImage: proto.String(b.Config.Disk.Image),
+	}
+	if len(diskLabels) > 0 {
+		initParams.Labels = diskLabels
 	}
 
 	return &computepb.AttachedDisk{
@@ -239,15 +245,7 @@ func mergeLabels(base map[string]string, override map[string]string) map[string]
 	return out
 }
 
-func buildMetadataItems(base map[string]string, override map[string]string, cloudInit string) []*computepb.Items {
-	merged := map[string]string{}
-	for k, v := range base {
-		merged[k] = v
-	}
-	for k, v := range override {
-		merged[k] = v
-	}
-
+func buildMetadataItems(merged map[string]string, cloudInit string) []*computepb.Items {
 	items := []*computepb.Items{{
 		Key:   proto.String("user-data"),
 		Value: proto.String(cloudInit),
@@ -259,4 +257,31 @@ func buildMetadataItems(base map[string]string, override map[string]string, clou
 		items = append(items, &computepb.Items{Key: &key, Value: &val})
 	}
 	return items
+}
+
+func mergeMetadata(base map[string]string, override map[string]string) map[string]string {
+	merged := map[string]string{}
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range override {
+		if k == "ssh-keys" {
+			merged[k] = appendMetadataLines(merged[k], v)
+			continue
+		}
+		merged[k] = v
+	}
+	return merged
+}
+
+func appendMetadataLines(existing, extra string) string {
+	existing = strings.TrimSpace(existing)
+	extra = strings.TrimSpace(extra)
+	if existing == "" {
+		return extra
+	}
+	if extra == "" {
+		return existing
+	}
+	return existing + "\n" + extra
 }

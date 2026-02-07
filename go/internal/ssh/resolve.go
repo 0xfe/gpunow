@@ -38,31 +38,15 @@ func ResolveClusterTarget(ctx context.Context, compute gcp.Compute, cfg *config.
 		return nil, fmt.Errorf("target must be cluster/index")
 	}
 	cluster := parsed.Cluster
-	masterName := fmt.Sprintf("%s-0", cluster)
-
-	master, err := getInstance(ctx, compute, cfg, masterName)
+	inst, err := getInstance(ctx, compute, cfg, parsed.Name)
 	if err != nil {
 		return nil, err
 	}
-	masterIP := externalIP(master)
-	if masterIP == "" {
-		return nil, fmt.Errorf("master instance has no external IP")
+	publicIP := externalIP(inst)
+	if publicIP == "" {
+		return nil, fmt.Errorf("instance %s has no external IP", parsed.Name)
 	}
-
-	if parsed.Index == 0 {
-		return &ResolvedTarget{Cluster: cluster, Index: 0, Host: masterIP, MasterPublicIP: masterIP}, nil
-	}
-
-	worker, err := getInstance(ctx, compute, cfg, parsed.Name)
-	if err != nil {
-		return nil, err
-	}
-	internal := internalIP(worker)
-	if internal == "" {
-		return nil, fmt.Errorf("target instance has no internal IP")
-	}
-
-	return &ResolvedTarget{Cluster: cluster, Index: parsed.Index, Host: internal, MasterPublicIP: masterIP}, nil
+	return &ResolvedTarget{Cluster: cluster, Index: parsed.Index, Host: publicIP, MasterPublicIP: publicIP}, nil
 }
 
 func resolveVMTarget(ctx context.Context, compute gcp.Compute, cfg *config.Config, name string) (*ResolvedTarget, error) {
@@ -101,11 +85,4 @@ func externalIP(inst *computepb.Instance) string {
 		return ""
 	}
 	return iface.GetAccessConfigs()[0].GetNatIP()
-}
-
-func internalIP(inst *computepb.Instance) string {
-	if inst == nil || len(inst.GetNetworkInterfaces()) == 0 {
-		return ""
-	}
-	return inst.GetNetworkInterfaces()[0].GetNetworkIP()
 }

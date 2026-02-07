@@ -15,9 +15,9 @@ import (
 )
 
 type Config struct {
+	Version        int                  `toml:"version"`
 	Project        ProjectConfig        `toml:"project" validate:"required"`
 	Cluster        ClusterConfig        `toml:"cluster" validate:"required"`
-	VM             VMConfig             `toml:"vm" validate:"required"`
 	Instance       InstanceConfig       `toml:"instance" validate:"required"`
 	Network        NetworkConfig        `toml:"network" validate:"required"`
 	GPU            GPUConfig            `toml:"gpu" validate:"required"`
@@ -51,10 +51,6 @@ type ClusterConfig struct {
 	NetworkNamePrefix string `toml:"network_name_prefix" validate:"required"`
 	SubnetCIDRBase    string `toml:"subnet_cidr_base" validate:"required,cidr"`
 	SubnetPrefix      int    `toml:"subnet_prefix" validate:"gte=8,lte=30"`
-}
-
-type VMConfig struct {
-	DefaultName string `toml:"default_name" validate:"required"`
 }
 
 type InstanceConfig struct {
@@ -106,7 +102,8 @@ type ReservationConfig struct {
 }
 
 type SSHConfig struct {
-	DefaultUser string `toml:"default_user"`
+	DefaultUser  string `toml:"default_user"`
+	IdentityFile string `toml:"identity_file"`
 }
 
 type FilesConfig struct {
@@ -114,6 +111,8 @@ type FilesConfig struct {
 	SetupScript string `toml:"setup_script" validate:"required"`
 	Zshrc       string `toml:"zshrc" validate:"required"`
 }
+
+const configVersion = 2
 
 func Load(profile string, baseDir string) (*Config, error) {
 	if baseDir == "" {
@@ -136,6 +135,9 @@ func Load(profile string, baseDir string) (*Config, error) {
 	}
 
 	applyDefaults(&cfg)
+	if cfg.Version > configVersion {
+		return nil, fmt.Errorf("config version %d is newer than supported %d", cfg.Version, configVersion)
+	}
 	cfg.Profile = profile
 	cfg.Paths = Paths{
 		Dir:              cfgDir,
@@ -154,8 +156,8 @@ func Load(profile string, baseDir string) (*Config, error) {
 }
 
 func applyDefaults(cfg *Config) {
-	if cfg.VM.DefaultName == "" {
-		cfg.VM.DefaultName = "gpu0"
+	if cfg.Version == 0 {
+		cfg.Version = configVersion
 	}
 	if cfg.Files.CloudInit == "" {
 		cfg.Files.CloudInit = "cloud-init.yaml"
@@ -177,9 +179,6 @@ func validateConfig(cfg *Config) error {
 		return formatValidationError(err)
 	}
 
-	if !validate.IsResourceName(cfg.VM.DefaultName) {
-		return fmt.Errorf("vm.default_name must be a valid resource name")
-	}
 	if !validate.IsResourceName(cfg.Cluster.NetworkNamePrefix) {
 		return fmt.Errorf("cluster.network_name_prefix must be a valid resource name")
 	}

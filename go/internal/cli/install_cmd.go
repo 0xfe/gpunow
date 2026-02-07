@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/urfave/cli/v2"
 
@@ -38,13 +39,8 @@ func installAction(c *cli.Context) error {
 		return err
 	}
 
-	if dirExists(root) {
-		if !c.Bool("overwrite") {
-			return fmt.Errorf("config already exists at %s (use --overwrite to replace)", root)
-		}
-		if err := os.RemoveAll(root); err != nil {
-			return fmt.Errorf("remove existing config: %w", err)
-		}
+	if dirExists(root) && !c.Bool("overwrite") {
+		return fmt.Errorf("config already exists at %s (use --overwrite to replace)", root)
 	}
 
 	exe, err := os.Executable()
@@ -74,6 +70,15 @@ func installAction(c *cli.Context) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	if c.Bool("overwrite") && dirExists(profilesDir) {
+		timestamp := time.Now().UTC().Format("20060102150405")
+		backupDir := filepath.Join(root, fmt.Sprintf("profiles.old.%s", timestamp))
+		if err := os.Rename(profilesDir, backupDir); err != nil {
+			return fmt.Errorf("move existing profiles: %w", err)
+		}
+		uiPrinter.Infof("Moved existing profiles to %s", backupDir)
 	}
 
 	if err := os.MkdirAll(profilesDir, 0o755); err != nil {

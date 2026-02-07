@@ -15,21 +15,23 @@ users:
     lock_passwd: true
 
 write_files:
-  - path: /home/mo/setup.sh
-    owner: mo:mo
+  - path: /tmp/gpunow-setup.sh
+    owner: root:root
     permissions: "0755"
     content: |
       {{SETUP_SH}}
-  - path: /home/mo/.zshrc
-    owner: mo:mo
+  - path: /tmp/gpunow-zshrc
+    owner: root:root
     permissions: "0644"
     content: |
       {{ZSHRC}}
 
 runcmd:
-  - [bash, -lc, "if id -u mo >/dev/null 2>&1; then chown -R mo:mo /home/mo; fi"]
+  - [bash, -lc, "install -m 0755 /tmp/gpunow-setup.sh /home/mo/setup.sh"]
+  - [bash, -lc, "install -m 0644 /tmp/gpunow-zshrc /home/mo/.zshrc"]
+  - [bash, -lc, "chown mo:mo /home/mo/setup.sh /home/mo/.zshrc"]
+  - [bash, -lc, "rm -f /tmp/gpunow-setup.sh /tmp/gpunow-zshrc"]
+  - [bash, -lc, "command -v zsh >/dev/null 2>&1 || (echo 'zsh is required but not installed' >&2; exit 1)"]
   - [bash, -lc, "su - mo -c '/home/mo/setup.sh'"]
-  - [bash, -lc, "chown mo:mo /home/mo/.zshrc"]
   - ufw allow 22/tcp
-  - ufw allow 8000/tcp
   - ufw --force enable

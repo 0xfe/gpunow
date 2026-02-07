@@ -23,17 +23,6 @@ Config assumptions:
 - Per-cluster VPC + subnet; deterministic CIDR derived from base.
 - SSH/SCP uses ProxyJump via master for non-0 nodes.
 
-Work status:
-- M0 complete: go module + skeleton, VERSION, justfile, DESIGN.md, ai-state.md, profiles/default config.toml, README/AGENTS updated, cloud-init/setup moved.
-- M1 complete: config loader/validation, CLI skeleton, logging/UI scaffolding, target parsing, initial tests.
-- Home resolution: GPUNOW_HOME → ~/.config/gpunow. State written under <home>/state.
-- `gpunow install` copies the binary to ~/.local/bin and initializes ~/.config/gpunow/profiles/default from a source profile directory.
-- M2 complete: VM ops using Compute API, cloud-init rendering, updated CLI, tests.
-- M3 complete: cluster networking and lifecycle, subnet derivation, labels, tests.
-- M4 complete: SSH/SCP resolution via master proxy, command execution, tests.
-- M5 complete: progress bars for long ops.
-- M6 complete: docs refreshed.
-
 Notes:
 - Do not store secrets in repo.
 - Default log level WARN; no logs on normal runs.

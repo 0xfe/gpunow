@@ -15,6 +15,7 @@ type Compute interface {
 	DeleteInstance(ctx context.Context, req *computepb.DeleteInstanceRequest) (*compute.Operation, error)
 	SetInstanceScheduling(ctx context.Context, req *computepb.SetSchedulingInstanceRequest) (*compute.Operation, error)
 	SetInstanceTags(ctx context.Context, req *computepb.SetTagsInstanceRequest) (*compute.Operation, error)
+	SetInstanceMetadata(ctx context.Context, req *computepb.SetMetadataInstanceRequest) (*compute.Operation, error)
 	SetDiskAutoDelete(ctx context.Context, req *computepb.SetDiskAutoDeleteInstanceRequest) (*compute.Operation, error)
 	ListInstances(ctx context.Context, req *computepb.ListInstancesRequest) *compute.InstanceIterator
 
@@ -62,6 +63,10 @@ func (c *Client) SetInstanceScheduling(ctx context.Context, req *computepb.SetSc
 
 func (c *Client) SetInstanceTags(ctx context.Context, req *computepb.SetTagsInstanceRequest) (*compute.Operation, error) {
 	return c.Instances.SetTags(ctx, req)
+}
+
+func (c *Client) SetInstanceMetadata(ctx context.Context, req *computepb.SetMetadataInstanceRequest) (*compute.Operation, error) {
+	return c.Instances.SetMetadata(ctx, req)
 }
 
 func (c *Client) SetDiskAutoDelete(ctx context.Context, req *computepb.SetDiskAutoDeleteInstanceRequest) (*compute.Operation, error) {

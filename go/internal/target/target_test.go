@@ -31,6 +31,22 @@ func TestParseClusterRef(t *testing.T) {
 	}
 }
 
+func TestParseClusterAlias(t *testing.T) {
+	parsed, err := Parse("my-cluster-2")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !parsed.IsCluster {
+		t.Fatalf("expected cluster target")
+	}
+	if parsed.Cluster != "my-cluster" || parsed.Index != 2 {
+		t.Fatalf("unexpected cluster parse: %+v", parsed)
+	}
+	if parsed.Name != "my-cluster-2" {
+		t.Fatalf("unexpected name: %s", parsed.Name)
+	}
+}
+
 func TestParseInvalid(t *testing.T) {
 	cases := []string{"bad/", "bad/abc", "Bad/0", "bad/1/2", "/0"}
 	for _, c := range cases {
