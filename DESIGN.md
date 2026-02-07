@@ -15,13 +15,14 @@
 - `internal/config`: config loading and validation.
 - `internal/gcp`: Compute Engine API wrapper interfaces.
 - `internal/instance`: shared instance builder for VM/cluster creation.
+- `internal/pricing`: Cloud Billing SKU fetch/match, cache, and cost estimation.
 - `internal/cluster`: cluster orchestration and networking.
 - `internal/ssh`: SSH/SCP argument construction and resolution.
 - `internal/ui`: terminal output styling and progress.
 
 ## CLI Surface
 - `gpunow install`
-- `gpunow create <cluster> -n/--num-instances N [--start]`
+- `gpunow create <cluster> -n/--num-instances N [--start] [--estimate-cost] [--refresh]`
 - `gpunow start <cluster>`
 - `gpunow stop <cluster> [--delete] [--keep-disks]`
 - `gpunow status [cluster]`

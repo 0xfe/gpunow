@@ -69,6 +69,8 @@ func createCommand() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.IntFlag{Name: "num-instances", Aliases: []string{"n"}, Usage: "Number of instances"},
 			&cli.BoolFlag{Name: "start", Usage: "Start the cluster after creating it"},
+			&cli.BoolFlag{Name: "estimate-cost", Usage: "Estimate creation cost before proceeding"},
+			&cli.BoolFlag{Name: "refresh", Usage: "Refresh cached pricing data (requires --estimate-cost)"},
 		},
 		Action: createCluster,
 	}
@@ -163,10 +165,27 @@ func createCluster(c *cli.Context) error {
 		return usageError(c, "--num-instances must be a positive integer")
 	}
 	startNow := c.Bool("start") || hasBoolArg(c.Args().Slice(), "start")
+	estimateCost := c.Bool("estimate-cost") || hasBoolArg(c.Args().Slice(), "estimate-cost")
+	refreshPricing := c.Bool("refresh") || hasBoolArg(c.Args().Slice(), "refresh")
+	if refreshPricing && !estimateCost {
+		return usageError(c, "--refresh requires --estimate-cost")
+	}
 	if startNow {
-		return createAndStartCluster(c, state, clusterName, numInstances)
+		return createAndStartCluster(c, state, clusterName, numInstances, createOptions{
+			EstimateCost:   estimateCost,
+			RefreshPricing: refreshPricing,
+		})
 	}
 	announce(state)
+	if estimateCost {
+		compute, err := state.ComputeClient(c.Context)
+		if err != nil {
+			return err
+		}
+		if err := estimateClusterCreateCost(c.Context, state, compute, numInstances, refreshPricing); err != nil {
+			return err
+		}
+	}
 	if state.State != nil {
 		if err := state.State.RecordClusterCreate(clusterName, state.Profile, numInstances, time.Now()); err != nil {
 			state.UI.Warnf("Failed to update state: %v", err)
@@ -179,7 +198,12 @@ func createCluster(c *cli.Context) error {
 	return nil
 }
 
-func createAndStartCluster(c *cli.Context, state *State, clusterName string, numInstances int) error {
+type createOptions struct {
+	EstimateCost   bool
+	RefreshPricing bool
+}
+
+func createAndStartCluster(c *cli.Context, state *State, clusterName string, numInstances int, opts createOptions) error {
 	selection, err := resolveSSHSelection(state)
 	if err != nil {
 		return err
@@ -190,15 +214,20 @@ func createAndStartCluster(c *cli.Context, state *State, clusterName string, num
 	}
 	announceWithKey(state, selection, true)
 
+	compute, err := state.ComputeClient(c.Context)
+	if err != nil {
+		return err
+	}
+	if opts.EstimateCost {
+		if err := estimateClusterCreateCost(c.Context, state, compute, numInstances, opts.RefreshPricing); err != nil {
+			return err
+		}
+	}
+
 	if state.State != nil {
 		if err := state.State.RecordClusterCreate(clusterName, state.Profile, numInstances, time.Now()); err != nil {
 			state.UI.Warnf("Failed to update state: %v", err)
 		}
-	}
-
-	compute, err := state.ComputeClient(c.Context)
-	if err != nil {
-		return err
 	}
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)

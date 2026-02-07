@@ -57,6 +57,10 @@ func looksLikeCreateShorthand(args []string) bool {
 			hasCreateFlag = true
 		case arg == "--start":
 			hasCreateFlag = true
+		case arg == "--estimate-cost":
+			hasCreateFlag = true
+		case arg == "--refresh":
+			hasCreateFlag = true
 		case strings.HasPrefix(arg, "-"):
 			continue
 		default:

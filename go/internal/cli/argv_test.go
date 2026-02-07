@@ -27,6 +27,11 @@ func TestNormalizeArgs(t *testing.T) {
 			want: []string{"gpunow", "create", "foo", "-n", "3", "--start"},
 		},
 		{
+			name: "estimate-cost shorthand rewrites to create",
+			in:   []string{"gpunow", "foo", "--estimate-cost", "-n", "3"},
+			want: []string{"gpunow", "create", "foo", "--estimate-cost", "-n", "3"},
+		},
+		{
 			name: "known command remains",
 			in:   []string{"gpunow", "start", "foo", "-n", "3"},
 			want: []string{"gpunow", "start", "foo", "-n", "3"},

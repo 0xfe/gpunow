@@ -21,6 +21,9 @@ gcloud auth application-default login
 $ gpunow create my-cluster -n 3 --start
 ✓ Created cluster my-cluster (3 instances) in local state
 
+# Preview estimated cost before creating resources
+$ gpunow create my-cluster -n 3 --estimate-cost
+
 # See status
 ➜ gpunow status
 
@@ -65,6 +68,8 @@ Cluster:
 ./bin/gpunow create my-cluster -n 3
 ./bin/gpunow start my-cluster
 ./bin/gpunow create my-cluster -n 3 --start
+./bin/gpunow create my-cluster -n 3 --estimate-cost
+./bin/gpunow create my-cluster -n 3 --estimate-cost --refresh
 ./bin/gpunow status my-cluster
 ./bin/gpunow update my-cluster --max-hours 24
 ./bin/gpunow stop my-cluster --delete
@@ -139,6 +144,10 @@ Key settings in `config.toml`:
 - Network defaults control additional allowed ports when configured.
 - Hostnames: GCE requires a fully qualified domain name (FQDN) if you set `instance.hostname_domain`.
   Leave it empty to use the default internal DNS hostname derived from the instance name.
+- `gpunow create --estimate-cost` estimates VM core/RAM, GPU, and boot disk pricing using the Cloud Billing Catalog API.
+- Pricing data is cached at `<home>/state/pricing-cache.json` and reused automatically.
+- Use `--refresh` with `--estimate-cost` to force re-download of pricing data.
+- Estimates intentionally exclude egress, discounts/credits, taxes, and OS/license premiums.
 
 ## Repository Layout
 - `go/`: Go source code
