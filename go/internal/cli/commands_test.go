@@ -64,3 +64,77 @@ func TestParseStringFlagFromArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveStopKeepDisks(t *testing.T) {
+	tests := []struct {
+		name        string
+		deleteFlag  bool
+		keepFlag    bool
+		deleteDisks bool
+		defaultKeep bool
+		wantKeep    bool
+		wantErr     bool
+	}{
+		{
+			name:        "default delete disks",
+			deleteFlag:  true,
+			defaultKeep: false,
+			wantKeep:    false,
+		},
+		{
+			name:        "default keep disks",
+			deleteFlag:  true,
+			defaultKeep: true,
+			wantKeep:    true,
+		},
+		{
+			name:        "override keep",
+			deleteFlag:  true,
+			keepFlag:    true,
+			defaultKeep: false,
+			wantKeep:    true,
+		},
+		{
+			name:        "override delete",
+			deleteFlag:  true,
+			deleteDisks: true,
+			defaultKeep: true,
+			wantKeep:    false,
+		},
+		{
+			name:        "conflicting flags",
+			deleteFlag:  true,
+			keepFlag:    true,
+			deleteDisks: true,
+			defaultKeep: true,
+			wantErr:     true,
+		},
+		{
+			name:        "keep without delete",
+			keepFlag:    true,
+			defaultKeep: false,
+			wantErr:     true,
+		},
+		{
+			name:        "delete-disks without delete",
+			deleteDisks: true,
+			defaultKeep: true,
+			wantErr:     true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveStopKeepDisks(tc.deleteFlag, tc.keepFlag, tc.deleteDisks, tc.defaultKeep)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err mismatch: got=%v wantErr=%v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if got != tc.wantKeep {
+				t.Fatalf("keep mismatch: got=%v want=%v", got, tc.wantKeep)
+			}
+		})
+	}
+}

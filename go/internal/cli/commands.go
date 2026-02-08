@@ -7,13 +7,16 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/urfave/cli/v2"
+	"go.uber.org/zap"
 
 	"gpunow/internal/cluster"
 	"gpunow/internal/config"
 	"gpunow/internal/gcp"
+	"gpunow/internal/lifecycle"
 	"gpunow/internal/ssh"
 	appstate "gpunow/internal/state"
 	"gpunow/internal/target"
@@ -102,6 +105,7 @@ func stopCommand() *cli.Command {
 		ArgsUsage: "<cluster>",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{Name: "delete", Usage: "Delete instances"},
+			&cli.BoolFlag{Name: "keep-disks", Usage: "Keep boot disks when deleting instances"},
 			&cli.BoolFlag{Name: "delete-disks", Usage: "Delete boot disks when deleting instances"},
 		},
 		Action: stopCluster,
@@ -245,9 +249,10 @@ func createAndStartCluster(c *cli.Context, state *State, clusterName string, num
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
 	startOptions := applyClusterConfig(cluster.StartOptions{
-		NumInstances: numInstances,
-		SSHUser:      user,
-		SSHPublicKey: selectionKey(selection),
+		NumInstances:  numInstances,
+		SSHUser:       user,
+		SSHPublicKey:  selectionKey(selection),
+		OnStateChange: clusterStateUpdateFn(state, clusterName),
 	}, opts.ClusterConfig)
 	if err := service.Start(c.Context, clusterName, startOptions); err != nil {
 		return err
@@ -313,9 +318,10 @@ func startCluster(c *cli.Context) error {
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
 	startOptions := applyClusterConfig(cluster.StartOptions{
-		NumInstances: numInstances,
-		SSHUser:      user,
-		SSHPublicKey: selectionKey(selection),
+		NumInstances:  numInstances,
+		SSHUser:       user,
+		SSHPublicKey:  selectionKey(selection),
+		OnStateChange: clusterStateUpdateFn(state, clusterName),
 	}, clusterConfig)
 	if err := service.Start(c.Context, clusterName, startOptions); err != nil {
 		return err
@@ -339,10 +345,8 @@ func stopCluster(c *cli.Context) error {
 	}
 	announce(state)
 	deleteFlag := c.Bool("delete") || hasBoolArg(c.Args().Slice(), "delete")
+	keepDisksFlag := c.Bool("keep-disks") || hasBoolArg(c.Args().Slice(), "keep-disks")
 	deleteDisks := c.Bool("delete-disks") || hasBoolArg(c.Args().Slice(), "delete-disks")
-	if !deleteFlag && deleteDisks {
-		return usageError(c, "--delete-disks requires --delete")
-	}
 	clusterConfig := appstate.ClusterConfig{}
 	if state.State != nil {
 		data, err := state.State.Load()
@@ -353,7 +357,10 @@ func stopCluster(c *cli.Context) error {
 			clusterConfig = entry.Config
 		}
 	}
-	keepDisks := clusterConfig.KeepDisks && !deleteDisks
+	keepDisks, err := resolveStopKeepDisks(deleteFlag, keepDisksFlag, deleteDisks, clusterConfig.KeepDisks)
+	if err != nil {
+		return usageError(c, err.Error())
+	}
 
 	compute, err := state.ComputeClient(c.Context)
 	if err != nil {
@@ -362,9 +369,10 @@ func stopCluster(c *cli.Context) error {
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
 	if err := service.Stop(c.Context, clusterName, cluster.StopOptions{
-		Delete:      deleteFlag,
-		KeepDisks:   keepDisks,
-		DeleteDisks: deleteDisks,
+		Delete:        deleteFlag,
+		KeepDisks:     keepDisks,
+		DeleteDisks:   deleteDisks,
+		OnStateChange: clusterStateUpdateFn(state, clusterName),
 	}); err != nil {
 		return err
 	}
@@ -378,6 +386,22 @@ func stopCluster(c *cli.Context) error {
 		}
 	}
 	return nil
+}
+
+func resolveStopKeepDisks(deleteFlag, keepDisksFlag, deleteDisksFlag, defaultKeepDisks bool) (bool, error) {
+	if keepDisksFlag && deleteDisksFlag {
+		return false, fmt.Errorf("--keep-disks and --delete-disks are mutually exclusive")
+	}
+	if !deleteFlag && (keepDisksFlag || deleteDisksFlag) {
+		return false, fmt.Errorf("--keep-disks and --delete-disks require --delete")
+	}
+	if keepDisksFlag {
+		return true, nil
+	}
+	if deleteDisksFlag {
+		return false, nil
+	}
+	return defaultKeepDisks, nil
 }
 
 func updateCluster(c *cli.Context) error {
@@ -463,6 +487,9 @@ func sshAction(c *cli.Context) error {
 		if err := ensureSSHKeysForTarget(c.Context, compute, state.Config, user, publicKey, targetSpec); err != nil {
 			return err
 		}
+	}
+	if err := ensureTargetReadyForSSH(c.Context, state, compute, targetSpec, resolved); err != nil {
+		return err
 	}
 
 	commandArgs := sshCommandArgs(c.Args().Slice(), true)
@@ -597,6 +624,67 @@ func selectionKey(selection *ssh.PublicKeySelection) string {
 		return ""
 	}
 	return selection.Key
+}
+
+func selectionIdentityPath(selection *ssh.PublicKeySelection) string {
+	if selection == nil {
+		return ""
+	}
+	return selection.IdentityPath
+}
+
+func clusterStateUpdateFn(state *State, clusterName string) func(name, instanceState, externalIP, internalIP string) {
+	if state == nil || state.State == nil {
+		return nil
+	}
+	var mu sync.Mutex
+	return func(name, instanceState, externalIP, internalIP string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err := state.State.RecordClusterInstanceState(clusterName, name, instanceState, externalIP, internalIP, time.Now()); err != nil {
+			state.Logger.Debug("failed to persist instance lifecycle state", zap.String("cluster", clusterName), zap.String("instance", name), zap.Error(err))
+		}
+	}
+}
+
+func ensureTargetReadyForSSH(ctx context.Context, state *State, compute gcp.Compute, targetSpec target.Target, resolved *ssh.ResolvedTarget) error {
+	if state == nil || state.State == nil || !targetSpec.IsCluster {
+		return nil
+	}
+	data, err := state.State.Load()
+	if err != nil {
+		return err
+	}
+	clusterEntry := data.Clusters[targetSpec.Cluster]
+	if clusterEntry == nil {
+		return nil
+	}
+	instanceEntry := clusterEntry.Instances[targetSpec.Name]
+	instanceState := lifecycle.InstanceStateProvisioning
+	if instanceEntry != nil {
+		instanceState = lifecycle.NormalizeInstanceState(instanceEntry.State)
+	}
+	switch instanceState {
+	case lifecycle.InstanceStateReady:
+		return nil
+	case lifecycle.InstanceStateTerminated:
+		return fmt.Errorf("%s is TERMINATED; run `gpunow start %s` first", targetSpec.Name, targetSpec.Cluster)
+	case lifecycle.InstanceStateTerminating:
+		return fmt.Errorf("%s is TERMINATING; wait for stop to finish", targetSpec.Name)
+	}
+
+	state.UI.Infof("%s is %s; waiting until READY", targetSpec.Name, instanceState)
+	if err := state.State.RecordClusterInstanceState(targetSpec.Cluster, targetSpec.Name, lifecycle.InstanceStateProvisioning, resolved.Host, "", time.Now()); err != nil {
+		state.Logger.Debug("failed to persist provisioning state before ssh wait", zap.String("cluster", targetSpec.Cluster), zap.String("instance", targetSpec.Name), zap.Error(err))
+	}
+	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
+	if err := service.WaitForReady(ctx, targetSpec.Name, resolved.Host, 10*time.Minute); err != nil {
+		return err
+	}
+	if err := state.State.RecordClusterInstanceState(targetSpec.Cluster, targetSpec.Name, lifecycle.InstanceStateReady, resolved.Host, "", time.Now()); err != nil {
+		state.Logger.Debug("failed to persist ready state after ssh wait", zap.String("cluster", targetSpec.Cluster), zap.String("instance", targetSpec.Name), zap.Error(err))
+	}
+	return nil
 }
 
 func ensureSSHKeysForTarget(ctx context.Context, compute gcp.Compute, cfg *config.Config, user string, publicKey string, targetSpec target.Target) error {

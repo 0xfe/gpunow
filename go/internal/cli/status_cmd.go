@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"gpunow/internal/cluster"
 	"gpunow/internal/gcp"
 	"gpunow/internal/labels"
+	"gpunow/internal/lifecycle"
 	"gpunow/internal/ssh"
 	appstate "gpunow/internal/state"
 )
@@ -107,6 +109,7 @@ func statusSync(c *cli.Context) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	foundClusters := map[string]*appstate.Cluster{}
 	clusterAgg := map[string]*clusterStatusAgg{}
+	clusterInstances := map[string]map[string]*appstate.ClusterInstance{}
 
 	filter := labels.Filter()
 	it := compute.ListInstances(c.Context, &computepb.ListInstancesRequest{
@@ -139,6 +142,23 @@ func statusSync(c *cli.Context) error {
 		}
 		agg.total++
 		agg.observe(inst.GetStatus())
+		if clusterInstances[clusterName] == nil {
+			clusterInstances[clusterName] = map[string]*appstate.ClusterInstance{}
+		}
+		index := parseInstanceIndex(clusterName, inst.GetName())
+		if rawIndex, ok := instLabels["cluster_index"]; ok {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(rawIndex)); err == nil && parsed >= 0 {
+				index = parsed
+			}
+		}
+		clusterInstances[clusterName][inst.GetName()] = &appstate.ClusterInstance{
+			Name:       inst.GetName(),
+			Index:      index,
+			State:      lifecycle.FromComputeStatus(inst.GetStatus()),
+			ExternalIP: externalIPFromInstance(inst),
+			InternalIP: internalIPFromInstance(inst),
+			UpdatedAt:  now,
+		}
 	}
 
 	for name, agg := range clusterAgg {
@@ -157,6 +177,7 @@ func statusSync(c *cli.Context) error {
 		}
 		entry.NumInstances = agg.total
 		entry.Status = agg.status()
+		entry.Instances = clusterInstances[name]
 		entry.UpdatedAt = now
 		foundClusters[name] = entry
 	}
@@ -174,9 +195,18 @@ func statusSync(c *cli.Context) error {
 		}
 		if len(instances) > 0 {
 			agg := &clusterStatusAgg{}
+			instanceMap := map[string]*appstate.ClusterInstance{}
 			for _, inst := range instances {
 				agg.total++
 				agg.observe(inst.GetStatus())
+				instanceMap[inst.GetName()] = &appstate.ClusterInstance{
+					Name:       inst.GetName(),
+					Index:      parseInstanceIndex(name, inst.GetName()),
+					State:      lifecycle.FromComputeStatus(inst.GetStatus()),
+					ExternalIP: externalIPFromInstance(inst),
+					InternalIP: internalIPFromInstance(inst),
+					UpdatedAt:  now,
+				}
 			}
 			refreshed := existingCluster(data, name)
 			if refreshed.Name == "" {
@@ -190,8 +220,27 @@ func statusSync(c *cli.Context) error {
 			}
 			refreshed.NumInstances = agg.total
 			refreshed.Status = agg.status()
+			refreshed.Instances = instanceMap
 			refreshed.UpdatedAt = now
 			foundClusters[name] = refreshed
+			continue
+		}
+		if entry.LastAction == "create" && entry.Status != "deleted" {
+			if entry.Instances == nil {
+				entry.Instances = map[string]*appstate.ClusterInstance{}
+				for i := 0; i < entry.NumInstances; i++ {
+					instanceName := fmt.Sprintf("%s-%d", name, i)
+					entry.Instances[instanceName] = &appstate.ClusterInstance{
+						Name:      instanceName,
+						Index:     i,
+						State:     lifecycle.InstanceStateTerminated,
+						UpdatedAt: now,
+					}
+				}
+			}
+			entry.Status = lifecycle.InstanceStateTerminated
+			entry.UpdatedAt = now
+			foundClusters[name] = entry
 			continue
 		}
 		entry = markDeletedCluster(entry, now)
@@ -242,7 +291,11 @@ func renderStatus(state *State, data *appstate.Data, instancesByCluster map[stri
 			continue
 		}
 		activeClusters++
-		totalInstances += entry.NumInstances
+		if len(entry.Instances) > 0 {
+			totalInstances += len(entry.Instances)
+		} else {
+			totalInstances += entry.NumInstances
+		}
 	}
 
 	state.UI.Heading("Status")
@@ -269,30 +322,23 @@ func renderStatus(state *State, data *appstate.Data, instancesByCluster map[stri
 			profile := defaultProfile(entry.Profile)
 			line := fmt.Sprintf("%s (%s) %s", entry.Name, profile, entry.Status)
 			state.UI.Infof("%s", line)
-			state.UI.InfofIndent(1, "Instances: %d", entry.NumInstances)
+			instanceCount := entry.NumInstances
+			if len(entry.Instances) > 0 {
+				instanceCount = len(entry.Instances)
+			}
+			state.UI.InfofIndent(1, "Instances: %d", instanceCount)
 			if overrideSummary := clusterConfigSummary(entry.Config); overrideSummary != "" {
 				state.UI.InfofIndent(1, "Overrides: %s", overrideSummary)
 			}
-			if instances := instancesByCluster[entry.Name]; len(instances) > 0 {
-				sort.Slice(instances, func(i, j int) bool {
-					return instances[i].GetName() < instances[j].GetName()
-				})
-				for _, inst := range instances {
-					if inst == nil {
-						continue
-					}
-					external := externalIPFromInstance(inst)
-					internal := internalIPFromInstance(inst)
-					status := normalizeStatus(inst.GetStatus())
-					line := fmt.Sprintf("%s (%s)", inst.GetName(), status)
-					if external != "" {
-						line = fmt.Sprintf("%s %s", line, external)
-					}
-					if internal != "" {
-						line = fmt.Sprintf("%s [%s]", line, internal)
-					}
-					state.UI.InfofIndent(1, "%s", line)
+			for _, instance := range renderedInstances(entry, instancesByCluster[entry.Name]) {
+				line := fmt.Sprintf("%s (%s)", instance.Name, instance.State)
+				if instance.ExternalIP != "" {
+					line = fmt.Sprintf("%s %s", line, instance.ExternalIP)
 				}
+				if instance.InternalIP != "" {
+					line = fmt.Sprintf("%s [%s]", line, instance.InternalIP)
+				}
+				state.UI.InfofIndent(1, "%s", line)
 			}
 			if entry.LastAction != "" {
 				state.UI.InfofIndent(1, "Last action: %s (%s)", entry.LastAction, entry.LastActionAt)
@@ -304,46 +350,131 @@ func renderStatus(state *State, data *appstate.Data, instancesByCluster map[stri
 	}
 }
 
+type statusInstanceLine struct {
+	Name       string
+	State      string
+	ExternalIP string
+	InternalIP string
+	Index      int
+}
+
+func renderedInstances(entry *appstate.Cluster, live []*computepb.Instance) []statusInstanceLine {
+	byName := map[string]statusInstanceLine{}
+	for name, instance := range entry.Instances {
+		if instance == nil {
+			continue
+		}
+		line := statusInstanceLine{
+			Name:       name,
+			State:      lifecycle.NormalizeInstanceState(instance.State),
+			ExternalIP: instance.ExternalIP,
+			InternalIP: instance.InternalIP,
+			Index:      instance.Index,
+		}
+		if line.State == "" {
+			line.State = lifecycle.InstanceStateTerminated
+		}
+		byName[name] = line
+	}
+	for _, inst := range live {
+		if inst == nil {
+			continue
+		}
+		name := inst.GetName()
+		line := byName[name]
+		if line.Name == "" {
+			line.Name = name
+			line.State = lifecycle.FromComputeStatus(inst.GetStatus())
+			line.Index = parseInstanceIndex(entry.Name, name)
+		}
+		if line.ExternalIP == "" {
+			line.ExternalIP = externalIPFromInstance(inst)
+		}
+		if line.InternalIP == "" {
+			line.InternalIP = internalIPFromInstance(inst)
+		}
+		byName[name] = line
+	}
+
+	out := make([]statusInstanceLine, 0, len(byName))
+	for _, line := range byName {
+		if line.Name == "" {
+			continue
+		}
+		if line.State == "" {
+			line.State = lifecycle.InstanceStateTerminated
+		}
+		if line.Index < 0 {
+			line.Index = parseInstanceIndex(entry.Name, line.Name)
+		}
+		out = append(out, line)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Index != out[j].Index {
+			if out[i].Index < 0 {
+				return false
+			}
+			if out[j].Index < 0 {
+				return true
+			}
+			return out[i].Index < out[j].Index
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
 type clusterStatusAgg struct {
-	total         int
-	anyRunning    bool
-	anyTerminated bool
-	anyTransition bool
+	total          int
+	anyReady       bool
+	anyTerminated  bool
+	anyStarting    bool
+	anyTerminating bool
 }
 
 func (c *clusterStatusAgg) observe(status string) {
-	switch strings.ToUpper(status) {
-	case "RUNNING":
-		c.anyRunning = true
-	case "TERMINATED":
+	switch lifecycle.FromComputeStatus(status) {
+	case lifecycle.InstanceStateReady:
+		c.anyReady = true
+	case lifecycle.InstanceStateTerminated:
 		c.anyTerminated = true
+	case lifecycle.InstanceStateTerminating:
+		c.anyTerminating = true
 	default:
-		c.anyTransition = true
+		c.anyStarting = true
 	}
 }
 
 func (c *clusterStatusAgg) status() string {
 	if c.total == 0 {
-		return "stopped"
+		return lifecycle.InstanceStateTerminated
 	}
-	if c.anyRunning || c.anyTransition {
-		return "running"
+	if c.anyTerminating {
+		return lifecycle.InstanceStateTerminating
 	}
-	if c.anyTerminated {
-		return "stopped"
+	if c.anyStarting {
+		return lifecycle.InstanceStateStarting
 	}
-	return "unknown"
+	if c.anyReady && !c.anyTerminated {
+		return lifecycle.InstanceStateReady
+	}
+	if c.anyReady {
+		return lifecycle.InstanceStateStarting
+	}
+	return lifecycle.InstanceStateTerminated
 }
 
-func normalizeStatus(status string) string {
-	switch strings.ToUpper(status) {
-	case "RUNNING":
-		return "running"
-	case "TERMINATED":
-		return "stopped"
-	default:
-		return strings.ToLower(status)
+func parseInstanceIndex(clusterName, instanceName string) int {
+	prefix := clusterName + "-"
+	if !strings.HasPrefix(instanceName, prefix) {
+		return -1
 	}
+	raw := strings.TrimPrefix(instanceName, prefix)
+	idx, err := strconv.Atoi(raw)
+	if err != nil || idx < 0 {
+		return -1
+	}
+	return idx
 }
 
 func existingCluster(data *appstate.Data, name string) *appstate.Cluster {

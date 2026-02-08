@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
+
+	"gpunow/internal/lifecycle"
 )
 
-const stateVersion = 2
+const stateVersion = 3
 
 type Store struct {
 	Dir  string
@@ -23,16 +27,27 @@ type Data struct {
 }
 
 type Cluster struct {
-	Name         string        `json:"name"`
-	Profile      string        `json:"profile"`
-	NumInstances int           `json:"num_instances"`
-	Config       ClusterConfig `json:"config,omitempty"`
-	Status       string        `json:"status"`
-	CreatedAt    string        `json:"created_at,omitempty"`
-	UpdatedAt    string        `json:"updated_at,omitempty"`
-	LastAction   string        `json:"last_action,omitempty"`
-	LastActionAt string        `json:"last_action_at,omitempty"`
-	DeletedAt    string        `json:"deleted_at,omitempty"`
+	Name         string                      `json:"name"`
+	Profile      string                      `json:"profile"`
+	NumInstances int                         `json:"num_instances"`
+	Config       ClusterConfig               `json:"config,omitempty"`
+	Instances    map[string]*ClusterInstance `json:"instances,omitempty"`
+	Status       string                      `json:"status"`
+	CreatedAt    string                      `json:"created_at,omitempty"`
+	UpdatedAt    string                      `json:"updated_at,omitempty"`
+	LastAction   string                      `json:"last_action,omitempty"`
+	LastActionAt string                      `json:"last_action_at,omitempty"`
+	DeletedAt    string                      `json:"deleted_at,omitempty"`
+}
+
+type ClusterInstance struct {
+	Name       string `json:"name"`
+	Index      int    `json:"index"`
+	State      string `json:"state"`
+	ExternalIP string `json:"external_ip,omitempty"`
+	InternalIP string `json:"internal_ip,omitempty"`
+	CreatedAt  string `json:"created_at,omitempty"`
+	UpdatedAt  string `json:"updated_at,omitempty"`
 }
 
 type ClusterConfig struct {
@@ -82,7 +97,8 @@ func (s *Store) RecordClusterCreate(name, profile string, numInstances int, clus
 	entry.Profile = profile
 	entry.NumInstances = numInstances
 	entry.Config = clusterConfig
-	entry.Status = "stopped"
+	entry.Instances = ensureClusterInstances(name, entry.Instances, numInstances, ts)
+	entry.Status = deriveClusterState(entry.Instances, entry.NumInstances)
 	entry.LastAction = "create"
 	entry.LastActionAt = ts
 	entry.DeletedAt = ""
@@ -111,7 +127,8 @@ func (s *Store) RecordClusterStart(name, profile string, numInstances int, clust
 	entry.Profile = profile
 	entry.NumInstances = numInstances
 	entry.Config = clusterConfig
-	entry.Status = "running"
+	entry.Instances = ensureClusterInstances(name, entry.Instances, numInstances, ts)
+	entry.Status = deriveClusterState(entry.Instances, entry.NumInstances)
 	entry.LastAction = "start"
 	entry.LastActionAt = ts
 	entry.DeletedAt = ""
@@ -141,7 +158,16 @@ func (s *Store) RecordClusterStop(name string, deleted bool, when time.Time) err
 		entry.LastAction = "delete"
 		entry.LastActionAt = ts
 	} else {
-		entry.Status = "stopped"
+		for _, instance := range entry.Instances {
+			if instance == nil {
+				continue
+			}
+			instance.State = lifecycle.InstanceStateTerminated
+			instance.ExternalIP = ""
+			instance.InternalIP = ""
+			instance.UpdatedAt = ts
+		}
+		entry.Status = deriveClusterState(entry.Instances, entry.NumInstances)
 		entry.LastAction = "stop"
 		entry.LastActionAt = ts
 	}
@@ -179,6 +205,56 @@ func (s *Store) DeleteCluster(name string) error {
 		delete(data.Clusters, name)
 	}
 	data.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return s.save(data)
+}
+
+func (s *Store) RecordClusterInstanceState(clusterName, instanceName, instanceState, externalIP, internalIP string, when time.Time) error {
+	data, err := s.load()
+	if err != nil {
+		return err
+	}
+	if data.Clusters == nil {
+		data.Clusters = map[string]*Cluster{}
+	}
+	entry := data.Clusters[clusterName]
+	if entry == nil {
+		entry = &Cluster{Name: clusterName}
+		data.Clusters[clusterName] = entry
+	}
+	ts := when.UTC().Format(time.RFC3339)
+	if entry.CreatedAt == "" {
+		entry.CreatedAt = ts
+	}
+	entry.UpdatedAt = ts
+	entry.DeletedAt = ""
+	entry.Instances = ensureClusterInstances(clusterName, entry.Instances, entry.NumInstances, ts)
+
+	instanceEntry := entry.Instances[instanceName]
+	if instanceEntry == nil {
+		instanceEntry = &ClusterInstance{
+			Name:      instanceName,
+			Index:     parseInstanceIndex(clusterName, instanceName),
+			CreatedAt: ts,
+		}
+		entry.Instances[instanceName] = instanceEntry
+	}
+	instanceEntry.State = lifecycle.NormalizeInstanceState(instanceState)
+	instanceEntry.UpdatedAt = ts
+	if externalIP != "" || instanceEntry.State == lifecycle.InstanceStateTerminated {
+		instanceEntry.ExternalIP = externalIP
+	}
+	if internalIP != "" || instanceEntry.State == lifecycle.InstanceStateTerminated {
+		instanceEntry.InternalIP = internalIP
+	}
+	if instanceEntry.CreatedAt == "" {
+		instanceEntry.CreatedAt = ts
+	}
+
+	if entry.NumInstances < len(entry.Instances) {
+		entry.NumInstances = len(entry.Instances)
+	}
+	entry.Status = deriveClusterState(entry.Instances, entry.NumInstances)
+	data.UpdatedAt = ts
 	return s.save(data)
 }
 
@@ -293,6 +369,34 @@ func (s *Store) load() (*Data, error) {
 	if data.Clusters == nil {
 		data.Clusters = map[string]*Cluster{}
 	}
+	for name, cluster := range data.Clusters {
+		if cluster == nil {
+			cluster = &Cluster{Name: name}
+			data.Clusters[name] = cluster
+		}
+		if cluster.Name == "" {
+			cluster.Name = name
+		}
+		cluster.Instances = ensureClusterInstances(cluster.Name, cluster.Instances, cluster.NumInstances, cluster.CreatedAt)
+		for instanceName, instance := range cluster.Instances {
+			if instance == nil {
+				instance = &ClusterInstance{Name: instanceName}
+				cluster.Instances[instanceName] = instance
+			}
+			if instance.Name == "" {
+				instance.Name = instanceName
+			}
+			instance.Index = parseInstanceIndex(cluster.Name, instance.Name)
+			if instance.State == "" {
+				instance.State = lifecycle.InstanceStateTerminated
+			} else {
+				instance.State = lifecycle.NormalizeInstanceState(instance.State)
+			}
+		}
+		if cluster.Status == "" || cluster.Status == "running" || cluster.Status == "stopped" {
+			cluster.Status = deriveClusterState(cluster.Instances, cluster.NumInstances)
+		}
+	}
 	if data.VMs == nil {
 		data.VMs = map[string]*VM{}
 	}
@@ -321,4 +425,99 @@ func (s *Store) save(data *Data) error {
 		return fmt.Errorf("replace state: %w", err)
 	}
 	return nil
+}
+
+func ensureClusterInstances(clusterName string, existing map[string]*ClusterInstance, numInstances int, ts string) map[string]*ClusterInstance {
+	if existing == nil {
+		existing = map[string]*ClusterInstance{}
+	}
+	if numInstances <= 0 {
+		return existing
+	}
+	for i := 0; i < numInstances; i++ {
+		name := fmt.Sprintf("%s-%d", clusterName, i)
+		entry := existing[name]
+		if entry == nil {
+			entry = &ClusterInstance{
+				Name:      name,
+				Index:     i,
+				State:     lifecycle.InstanceStateTerminated,
+				CreatedAt: ts,
+				UpdatedAt: ts,
+			}
+			existing[name] = entry
+			continue
+		}
+		if entry.Name == "" {
+			entry.Name = name
+		}
+		entry.Index = i
+		if entry.State == "" {
+			entry.State = lifecycle.InstanceStateTerminated
+		}
+		if entry.CreatedAt == "" {
+			entry.CreatedAt = ts
+		}
+		if entry.UpdatedAt == "" {
+			entry.UpdatedAt = ts
+		}
+	}
+	return existing
+}
+
+func deriveClusterState(instances map[string]*ClusterInstance, configuredCount int) string {
+	if configuredCount <= 0 && len(instances) == 0 {
+		return lifecycle.InstanceStateTerminated
+	}
+	terminatedCount := 0
+	readyCount := 0
+	hasStarting := false
+	hasProvisioning := false
+	hasTerminating := false
+	for _, instance := range instances {
+		if instance == nil {
+			continue
+		}
+		switch lifecycle.NormalizeInstanceState(instance.State) {
+		case lifecycle.InstanceStateStarting:
+			hasStarting = true
+		case lifecycle.InstanceStateProvisioning:
+			hasProvisioning = true
+		case lifecycle.InstanceStateTerminating:
+			hasTerminating = true
+		case lifecycle.InstanceStateReady:
+			readyCount++
+		case lifecycle.InstanceStateTerminated:
+			terminatedCount++
+		}
+	}
+	if hasTerminating {
+		return lifecycle.InstanceStateTerminating
+	}
+	if hasStarting {
+		return lifecycle.InstanceStateStarting
+	}
+	if hasProvisioning {
+		return lifecycle.InstanceStateProvisioning
+	}
+	if readyCount > 0 && terminatedCount == 0 {
+		return lifecycle.InstanceStateReady
+	}
+	if readyCount > 0 {
+		return lifecycle.InstanceStateStarting
+	}
+	return lifecycle.InstanceStateTerminated
+}
+
+func parseInstanceIndex(clusterName, instanceName string) int {
+	prefix := clusterName + "-"
+	if !strings.HasPrefix(instanceName, prefix) {
+		return -1
+	}
+	raw := strings.TrimPrefix(instanceName, prefix)
+	idx, err := strconv.Atoi(raw)
+	if err != nil || idx < 0 {
+		return -1
+	}
+	return idx
 }

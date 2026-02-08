@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	compute "cloud.google.com/go/compute/apiv1"
@@ -18,6 +19,7 @@ import (
 	"gpunow/internal/config"
 	"gpunow/internal/gcp"
 	"gpunow/internal/instance"
+	"gpunow/internal/lifecycle"
 	"gpunow/internal/ssh"
 	"gpunow/internal/ui"
 	"gpunow/internal/validate"
@@ -40,12 +42,15 @@ type StartOptions struct {
 	TerminationAction string
 	DiskSizeGB        int
 	KeepDisks         bool
+	ReadinessTimeout  time.Duration
+	OnStateChange     func(name, state, externalIP, internalIP string)
 }
 
 type StopOptions struct {
-	Delete      bool
-	KeepDisks   bool
-	DeleteDisks bool
+	Delete        bool
+	KeepDisks     bool
+	DeleteDisks   bool
+	OnStateChange func(name, state, externalIP, internalIP string)
 }
 
 type UpdateOptions struct {
@@ -163,7 +168,7 @@ func (s *Service) Start(ctx context.Context, clusterName string, opts StartOptio
 		SourceRanges: []string{"0.0.0.0/0"},
 		Allowed: []*computepb.Allowed{{
 			IPProtocol: proto.String("tcp"),
-			Ports:      portsToStrings(s.Config.Network.Ports),
+			Ports:      portsToStringsWithReadiness(s.Config.Network.Ports),
 		}},
 	}
 	if err := s.ensureFirewall(ctx, project, internalRule, internalFirewall); err != nil {
@@ -183,6 +188,12 @@ func (s *Service) Start(ctx context.Context, clusterName string, opts StartOptio
 	progress.MarkDone(4, fmt.Sprintf("Ready firewalls/%s", portsRule))
 
 	group, groupCtx := errgroup.WithContext(ctx)
+	var readinessMu sync.Mutex
+	waitReady := func(instanceName, externalIP string) error {
+		readinessMu.Lock()
+		defer readinessMu.Unlock()
+		return s.WaitForReady(groupCtx, instanceName, externalIP, opts.ReadinessTimeout)
+	}
 	for i := 0; i < opts.NumInstances; i++ {
 		name := s.instanceName(clusterName, i)
 		clusterIndex := i
@@ -193,6 +204,7 @@ func (s *Service) Start(ctx context.Context, clusterName string, opts StartOptio
 			role = "master"
 		}
 		group.Go(func() error {
+			s.updateInstanceState(opts.OnStateChange, name, lifecycle.InstanceStateStarting, "", "")
 			labels := map[string]string{
 				"cluster":       clusterName,
 				"cluster_index": strconv.Itoa(clusterIndex),
@@ -222,7 +234,13 @@ func (s *Service) Start(ctx context.Context, clusterName string, opts StartOptio
 					}
 				}
 				if instanceObj.GetStatus() == "RUNNING" {
-					progress.MarkDone(progressIndex, fmt.Sprintf("Already running %s", name))
+					externalIP, internalIP := instanceIPs(instanceObj)
+					s.updateInstanceState(opts.OnStateChange, name, lifecycle.InstanceStateProvisioning, externalIP, internalIP)
+					if err := waitReady(name, externalIP); err != nil {
+						return err
+					}
+					s.updateInstanceState(opts.OnStateChange, name, lifecycle.InstanceStateReady, externalIP, internalIP)
+					progress.MarkDone(progressIndex, fmt.Sprintf("Ready %s", name))
 					return nil
 				}
 				call := s.api("compute.instances.start", gcp.ZoneResource(project, zone, "instances", name), fmt.Sprintf("Starting %s", name))
@@ -238,7 +256,17 @@ func (s *Service) Start(ctx context.Context, clusterName string, opts StartOptio
 				if err := s.waitWithProgress(groupCtx, call, op, func(p int32) { progress.Update(progressIndex, p) }); err != nil {
 					return err
 				}
-				progress.MarkDone(progressIndex, fmt.Sprintf("Started %s", name))
+				refreshed, err := s.getInstance(groupCtx, name)
+				if err != nil {
+					return err
+				}
+				externalIP, internalIP := instanceIPs(refreshed)
+				s.updateInstanceState(opts.OnStateChange, name, lifecycle.InstanceStateProvisioning, externalIP, internalIP)
+				if err := waitReady(name, externalIP); err != nil {
+					return err
+				}
+				s.updateInstanceState(opts.OnStateChange, name, lifecycle.InstanceStateReady, externalIP, internalIP)
+				progress.MarkDone(progressIndex, fmt.Sprintf("Ready %s", name))
 				return nil
 			}
 
@@ -274,7 +302,17 @@ func (s *Service) Start(ctx context.Context, clusterName string, opts StartOptio
 					return err
 				}
 			}
-			progress.MarkDone(progressIndex, fmt.Sprintf("Created %s", name))
+			refreshed, err := s.getInstance(groupCtx, name)
+			if err != nil {
+				return err
+			}
+			externalIP, internalIP := instanceIPs(refreshed)
+			s.updateInstanceState(opts.OnStateChange, name, lifecycle.InstanceStateProvisioning, externalIP, internalIP)
+			if err := waitReady(name, externalIP); err != nil {
+				return err
+			}
+			s.updateInstanceState(opts.OnStateChange, name, lifecycle.InstanceStateReady, externalIP, internalIP)
+			progress.MarkDone(progressIndex, fmt.Sprintf("Ready %s", name))
 			return nil
 		})
 	}
@@ -347,6 +385,7 @@ func (s *Service) Stop(ctx context.Context, clusterName string, opts StopOptions
 		name := inst.GetName()
 		group.Go(func() error {
 			if opts.Delete {
+				s.updateInstanceState(opts.OnStateChange, name, lifecycle.InstanceStateTerminating, "", "")
 				autoDelete := !opts.KeepDisks
 				if opts.DeleteDisks {
 					autoDelete = true
@@ -367,14 +406,17 @@ func (s *Service) Stop(ctx context.Context, clusterName string, opts StopOptions
 				if err := s.waitWithProgress(groupCtx, call, op, func(p int32) { progress.Update(index, p) }); err != nil {
 					return err
 				}
+				s.updateInstanceState(opts.OnStateChange, name, lifecycle.InstanceStateTerminated, "", "")
 				progress.MarkDone(index, fmt.Sprintf("Deleted %s", name))
 				return nil
 			}
 
 			if inst.GetStatus() == "TERMINATED" {
+				s.updateInstanceState(opts.OnStateChange, name, lifecycle.InstanceStateTerminated, "", "")
 				progress.MarkDone(index, fmt.Sprintf("Already terminated %s", name))
 				return nil
 			}
+			s.updateInstanceState(opts.OnStateChange, name, lifecycle.InstanceStateTerminating, "", "")
 			call := s.api("compute.instances.stop", gcp.ZoneResource(project, zone, "instances", name), fmt.Sprintf("Stopping %s", name))
 			op, err := s.Compute.StopInstance(groupCtx, &computepb.StopInstanceRequest{
 				Project:  project,
@@ -388,6 +430,7 @@ func (s *Service) Stop(ctx context.Context, clusterName string, opts StopOptions
 			if err := s.waitWithProgress(groupCtx, call, op, func(p int32) { progress.Update(index, p) }); err != nil {
 				return err
 			}
+			s.updateInstanceState(opts.OnStateChange, name, lifecycle.InstanceStateTerminated, "", "")
 			progress.MarkDone(index, fmt.Sprintf("Stopped %s", name))
 			return nil
 		})
@@ -720,7 +763,7 @@ func (s *Service) ensureFirewalls(ctx context.Context, project, networkName, cid
 		SourceRanges: []string{"0.0.0.0/0"},
 		Allowed: []*computepb.Allowed{{
 			IPProtocol: proto.String("tcp"),
-			Ports:      portsToStrings(s.Config.Network.Ports),
+			Ports:      portsToStringsWithReadiness(s.Config.Network.Ports),
 		}},
 	}
 
@@ -960,6 +1003,26 @@ func (s *Service) instanceName(clusterName string, index int) string {
 	return fmt.Sprintf("%s-%d", clusterName, index)
 }
 
+func (s *Service) updateInstanceState(callback func(name, state, externalIP, internalIP string), name, state, externalIP, internalIP string) {
+	if callback == nil {
+		return
+	}
+	callback(name, state, externalIP, internalIP)
+}
+
+func instanceIPs(inst *computepb.Instance) (string, string) {
+	if inst == nil || len(inst.GetNetworkInterfaces()) == 0 {
+		return "", ""
+	}
+	iface := inst.GetNetworkInterfaces()[0]
+	internal := iface.GetNetworkIP()
+	external := ""
+	if len(iface.GetAccessConfigs()) > 0 {
+		external = iface.GetAccessConfigs()[0].GetNatIP()
+	}
+	return external, internal
+}
+
 func diskAutoDeleteOverride(keepDisks bool) *bool {
 	if !keepDisks {
 		return nil
@@ -974,6 +1037,21 @@ func portsToStrings(ports []int) []string {
 		out = append(out, strconv.Itoa(port))
 	}
 	return out
+}
+
+func portsToStringsWithReadiness(ports []int) []string {
+	withReadiness := append([]int{}, ports...)
+	found := false
+	for _, port := range withReadiness {
+		if port == readinessPort {
+			found = true
+			break
+		}
+	}
+	if !found {
+		withReadiness = append(withReadiness, readinessPort)
+	}
+	return portsToStrings(withReadiness)
 }
 
 func instanceNames(instances []*computepb.Instance) []string {

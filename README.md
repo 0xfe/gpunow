@@ -92,6 +92,8 @@ Cluster:
 ./bin/gpunow status my-cluster
 ./bin/gpunow update my-cluster --max-hours 24
 ./bin/gpunow stop my-cluster --delete
+./bin/gpunow stop my-cluster --delete --keep-disks
+./bin/gpunow stop my-cluster --delete --delete-disks
 ```
 
 Reference a node using `<cluster>/<index>` or `<cluster>-<index>`:
@@ -160,6 +162,13 @@ Key settings in `config.toml`:
 - `gpunow ssh` and `gpunow scp` connect directly to each node.
 - Firewall rules apply to all cluster nodes.
 - Host-level `ufw` is enabled and allows SSH (`22/tcp`) by default.
+- Instance lifecycle states are tracked in local state as:
+  `TERMINATED -> STARTING -> PROVISIONING -> READY -> TERMINATING -> TERMINATED`.
+- During first boot, cloud-init installs a local readiness sentinel on each VM:
+  `http://<instance-public-ip>:34223/` returns one of `ready`, `running`, or `error`.
+- `gpunow` ensures both GCP firewall and host `ufw` allow `34223/tcp` for readiness probes.
+- `gpunow start` waits for sentinel `ready` before marking an instance `READY`.
+- `gpunow ssh` checks instance lifecycle state and waits for `READY` when needed.
 - Network defaults control additional allowed ports when configured.
 - Hostnames: GCE requires a fully qualified domain name (FQDN) if you set `instance.hostname_domain`.
   Leave it empty to use the default internal DNS hostname derived from the instance name.

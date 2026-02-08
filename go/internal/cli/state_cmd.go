@@ -76,9 +76,23 @@ func stateShow(c *cli.Context) error {
 		}
 		line := fmt.Sprintf("%s (%s) %s", entry.Name, profile, entry.Status)
 		state.UI.Infof("%s", line)
-		state.UI.InfofIndent(1, "Instances: %d", entry.NumInstances)
+		instanceCount := entry.NumInstances
+		if len(entry.Instances) > 0 {
+			instanceCount = len(entry.Instances)
+		}
+		state.UI.InfofIndent(1, "Instances: %d", instanceCount)
 		if overrideSummary := clusterConfigSummary(entry.Config); overrideSummary != "" {
 			state.UI.InfofIndent(1, "Overrides: %s", overrideSummary)
+		}
+		for _, instance := range renderedInstances(entry, nil) {
+			line := fmt.Sprintf("%s (%s)", instance.Name, instance.State)
+			if instance.ExternalIP != "" {
+				line = fmt.Sprintf("%s %s", line, instance.ExternalIP)
+			}
+			if instance.InternalIP != "" {
+				line = fmt.Sprintf("%s [%s]", line, instance.InternalIP)
+			}
+			state.UI.InfofIndent(1, "%s", line)
 		}
 		if entry.CreatedAt != "" {
 			state.UI.InfofIndent(1, "Created: %s", entry.CreatedAt)
