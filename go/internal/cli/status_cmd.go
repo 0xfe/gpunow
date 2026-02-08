@@ -270,6 +270,9 @@ func renderStatus(state *State, data *appstate.Data, instancesByCluster map[stri
 			line := fmt.Sprintf("%s (%s) %s", entry.Name, profile, entry.Status)
 			state.UI.Infof("%s", line)
 			state.UI.InfofIndent(1, "Instances: %d", entry.NumInstances)
+			if overrideSummary := clusterConfigSummary(entry.Config); overrideSummary != "" {
+				state.UI.InfofIndent(1, "Overrides: %s", overrideSummary)
+			}
 			if instances := instancesByCluster[entry.Name]; len(instances) > 0 {
 				sort.Slice(instances, func(i, j int) bool {
 					return instances[i].GetName() < instances[j].GetName()

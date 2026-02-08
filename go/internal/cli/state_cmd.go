@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/urfave/cli/v2"
 
@@ -76,6 +77,9 @@ func stateShow(c *cli.Context) error {
 		line := fmt.Sprintf("%s (%s) %s", entry.Name, profile, entry.Status)
 		state.UI.Infof("%s", line)
 		state.UI.InfofIndent(1, "Instances: %d", entry.NumInstances)
+		if overrideSummary := clusterConfigSummary(entry.Config); overrideSummary != "" {
+			state.UI.InfofIndent(1, "Overrides: %s", overrideSummary)
+		}
 		if entry.CreatedAt != "" {
 			state.UI.InfofIndent(1, "Created: %s", entry.CreatedAt)
 		}
@@ -109,3 +113,23 @@ func stateRaw(c *cli.Context) error {
 }
 
 var _ = appstate.Data{}
+
+func clusterConfigSummary(cfg appstate.ClusterConfig) string {
+	items := []string{}
+	if machineType := strings.TrimSpace(cfg.GCPMachineType); machineType != "" {
+		items = append(items, fmt.Sprintf("machine=%s", machineType))
+	}
+	if cfg.GCPMaxRunHours > 0 {
+		items = append(items, fmt.Sprintf("max-run-hours=%d", cfg.GCPMaxRunHours))
+	}
+	if action := strings.TrimSpace(cfg.GCPTerminationAction); action != "" {
+		items = append(items, fmt.Sprintf("termination=%s", action))
+	}
+	if cfg.GCPDiskSizeGB > 0 {
+		items = append(items, fmt.Sprintf("disk-size-gb=%d", cfg.GCPDiskSizeGB))
+	}
+	if cfg.KeepDisks {
+		items = append(items, "keep-disks=true")
+	}
+	return strings.Join(items, ", ")
+}

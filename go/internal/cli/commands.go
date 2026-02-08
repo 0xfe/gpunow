@@ -15,6 +15,7 @@ import (
 	"gpunow/internal/config"
 	"gpunow/internal/gcp"
 	"gpunow/internal/ssh"
+	appstate "gpunow/internal/state"
 	"gpunow/internal/target"
 	"gpunow/internal/version"
 )
@@ -41,6 +42,7 @@ func NewApp() *cli.App {
 		},
 		Commands: []*cli.Command{
 			installCommand(),
+			configCommand(),
 			createCommand(),
 			startCommand(),
 			stopCommand(),
@@ -71,6 +73,11 @@ func createCommand() *cli.Command {
 			&cli.BoolFlag{Name: "start", Usage: "Start the cluster after creating it"},
 			&cli.BoolFlag{Name: "estimate-cost", Usage: "Estimate creation cost before proceeding"},
 			&cli.BoolFlag{Name: "refresh", Usage: "Refresh cached pricing data (requires --estimate-cost)"},
+			&cli.StringFlag{Name: "gcp-machine-type", Usage: "Override machine type for this cluster"},
+			&cli.IntFlag{Name: "gcp-max-run-hours", Usage: "Override max run duration in hours for this cluster"},
+			&cli.StringFlag{Name: "gcp-termination-action", Usage: "Override termination action (DELETE|STOP) for this cluster"},
+			&cli.IntFlag{Name: "gcp-disk-size-gb", Usage: "Override boot disk size in GB for this cluster"},
+			&cli.BoolFlag{Name: "keep-disks", Usage: "Preserve boot disks on delete for this cluster"},
 		},
 		Action: createCluster,
 	}
@@ -95,7 +102,7 @@ func stopCommand() *cli.Command {
 		ArgsUsage: "<cluster>",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{Name: "delete", Usage: "Delete instances"},
-			&cli.BoolFlag{Name: "keep-disks", Usage: "Preserve disks when deleting"},
+			&cli.BoolFlag{Name: "delete-disks", Usage: "Delete boot disks when deleting instances"},
 		},
 		Action: stopCluster,
 	}
@@ -164,6 +171,10 @@ func createCluster(c *cli.Context) error {
 	if !numInstancesExplicit || numInstances <= 0 {
 		return usageError(c, "--num-instances must be a positive integer")
 	}
+	clusterConfig, err := parseCreateClusterConfig(c)
+	if err != nil {
+		return usageError(c, err.Error())
+	}
 	startNow := c.Bool("start") || hasBoolArg(c.Args().Slice(), "start")
 	estimateCost := c.Bool("estimate-cost") || hasBoolArg(c.Args().Slice(), "estimate-cost")
 	refreshPricing := c.Bool("refresh") || hasBoolArg(c.Args().Slice(), "refresh")
@@ -172,6 +183,7 @@ func createCluster(c *cli.Context) error {
 	}
 	if startNow {
 		return createAndStartCluster(c, state, clusterName, numInstances, createOptions{
+			ClusterConfig:  clusterConfig,
 			EstimateCost:   estimateCost,
 			RefreshPricing: refreshPricing,
 		})
@@ -182,12 +194,12 @@ func createCluster(c *cli.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := estimateClusterCreateCost(c.Context, state, compute, numInstances, refreshPricing); err != nil {
+		if err := estimateClusterCreateCost(c.Context, state, compute, numInstances, refreshPricing, clusterConfig); err != nil {
 			return err
 		}
 	}
 	if state.State != nil {
-		if err := state.State.RecordClusterCreate(clusterName, state.Profile, numInstances, time.Now()); err != nil {
+		if err := state.State.RecordClusterCreate(clusterName, state.Profile, numInstances, clusterConfig, time.Now()); err != nil {
 			state.UI.Warnf("Failed to update state: %v", err)
 		} else {
 			state.UI.Successf("Created cluster %s (%d instances) in local state", clusterName, numInstances)
@@ -199,6 +211,7 @@ func createCluster(c *cli.Context) error {
 }
 
 type createOptions struct {
+	ClusterConfig  appstate.ClusterConfig
 	EstimateCost   bool
 	RefreshPricing bool
 }
@@ -219,27 +232,28 @@ func createAndStartCluster(c *cli.Context, state *State, clusterName string, num
 		return err
 	}
 	if opts.EstimateCost {
-		if err := estimateClusterCreateCost(c.Context, state, compute, numInstances, opts.RefreshPricing); err != nil {
+		if err := estimateClusterCreateCost(c.Context, state, compute, numInstances, opts.RefreshPricing, opts.ClusterConfig); err != nil {
 			return err
 		}
 	}
 
 	if state.State != nil {
-		if err := state.State.RecordClusterCreate(clusterName, state.Profile, numInstances, time.Now()); err != nil {
+		if err := state.State.RecordClusterCreate(clusterName, state.Profile, numInstances, opts.ClusterConfig, time.Now()); err != nil {
 			state.UI.Warnf("Failed to update state: %v", err)
 		}
 	}
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
-	if err := service.Start(c.Context, clusterName, cluster.StartOptions{
+	startOptions := applyClusterConfig(cluster.StartOptions{
 		NumInstances: numInstances,
 		SSHUser:      user,
 		SSHPublicKey: selectionKey(selection),
-	}); err != nil {
+	}, opts.ClusterConfig)
+	if err := service.Start(c.Context, clusterName, startOptions); err != nil {
 		return err
 	}
 	if state.State != nil {
-		if err := state.State.RecordClusterStart(clusterName, state.Profile, numInstances, time.Now()); err != nil {
+		if err := state.State.RecordClusterStart(clusterName, state.Profile, numInstances, opts.ClusterConfig, time.Now()); err != nil {
 			state.UI.Warnf("Failed to update state: %v", err)
 		}
 	}
@@ -262,6 +276,7 @@ func startCluster(c *cli.Context) error {
 	if numInstancesExplicit && numInstances <= 0 {
 		return usageError(c, "--num-instances must be a positive integer")
 	}
+	clusterConfig := appstate.ClusterConfig{}
 	var clusterEntryNumInstances int
 	if state.State != nil {
 		data, err := state.State.Load()
@@ -273,6 +288,7 @@ func startCluster(c *cli.Context) error {
 			return usageError(c, fmt.Sprintf("cluster %s not found in state; run `gpunow create %s -n <num>` first", clusterName, clusterName))
 		}
 		clusterEntryNumInstances = entry.NumInstances
+		clusterConfig = entry.Config
 	}
 	if !numInstancesExplicit {
 		numInstances = clusterEntryNumInstances
@@ -296,15 +312,16 @@ func startCluster(c *cli.Context) error {
 	}
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
-	if err := service.Start(c.Context, clusterName, cluster.StartOptions{
+	startOptions := applyClusterConfig(cluster.StartOptions{
 		NumInstances: numInstances,
 		SSHUser:      user,
 		SSHPublicKey: selectionKey(selection),
-	}); err != nil {
+	}, clusterConfig)
+	if err := service.Start(c.Context, clusterName, startOptions); err != nil {
 		return err
 	}
 	if state.State != nil {
-		if err := state.State.RecordClusterStart(clusterName, state.Profile, numInstances, time.Now()); err != nil {
+		if err := state.State.RecordClusterStart(clusterName, state.Profile, numInstances, clusterConfig, time.Now()); err != nil {
 			state.UI.Warnf("Failed to update state: %v", err)
 		}
 	}
@@ -322,10 +339,21 @@ func stopCluster(c *cli.Context) error {
 	}
 	announce(state)
 	deleteFlag := c.Bool("delete") || hasBoolArg(c.Args().Slice(), "delete")
-	keepDisks := c.Bool("keep-disks") || hasBoolArg(c.Args().Slice(), "keep-disks")
-	if !deleteFlag && keepDisks {
-		return usageError(c, "--keep-disks requires --delete")
+	deleteDisks := c.Bool("delete-disks") || hasBoolArg(c.Args().Slice(), "delete-disks")
+	if !deleteFlag && deleteDisks {
+		return usageError(c, "--delete-disks requires --delete")
 	}
+	clusterConfig := appstate.ClusterConfig{}
+	if state.State != nil {
+		data, err := state.State.Load()
+		if err != nil {
+			return err
+		}
+		if entry := data.Clusters[clusterName]; entry != nil {
+			clusterConfig = entry.Config
+		}
+	}
+	keepDisks := clusterConfig.KeepDisks && !deleteDisks
 
 	compute, err := state.ComputeClient(c.Context)
 	if err != nil {
@@ -334,8 +362,9 @@ func stopCluster(c *cli.Context) error {
 
 	service := cluster.NewService(compute, state.Config, state.UI, state.Logger)
 	if err := service.Stop(c.Context, clusterName, cluster.StopOptions{
-		Delete:    deleteFlag,
-		KeepDisks: keepDisks,
+		Delete:      deleteFlag,
+		KeepDisks:   keepDisks,
+		DeleteDisks: deleteDisks,
 	}); err != nil {
 		return err
 	}
@@ -633,17 +662,96 @@ func hasBoolArg(args []string, name string) bool {
 }
 
 func parseNumInstancesValue(c *cli.Context) (int, bool, error) {
-	if c.IsSet("num-instances") {
-		return c.Int("num-instances"), true, nil
+	return parseIntFlagValue(c, "num-instances", "-n", "--num-instances", "--num-instances must be a positive integer")
+}
+
+func parseCreateClusterConfig(c *cli.Context) (appstate.ClusterConfig, error) {
+	clusterConfig := appstate.ClusterConfig{}
+
+	machineType, machineTypeSet, err := parseStringFlagValue(c, "--gcp-machine-type", "gcp-machine-type")
+	if err != nil {
+		return appstate.ClusterConfig{}, err
 	}
-	return parseIntFlagFromArgs(c.Args().Slice(), "-n", "--num-instances", "--num-instances must be a positive integer")
+	if machineTypeSet {
+		value := strings.TrimSpace(machineType)
+		if value == "" {
+			return appstate.ClusterConfig{}, fmt.Errorf("--gcp-machine-type cannot be empty")
+		}
+		clusterConfig.GCPMachineType = value
+	}
+
+	maxRunHours, maxRunHoursSet, err := parseIntFlagValue(c, "gcp-max-run-hours", "", "--gcp-max-run-hours", "--gcp-max-run-hours must be a positive integer")
+	if err != nil {
+		return appstate.ClusterConfig{}, err
+	}
+	if maxRunHoursSet {
+		value := maxRunHours
+		if value <= 0 {
+			return appstate.ClusterConfig{}, fmt.Errorf("--gcp-max-run-hours must be a positive integer")
+		}
+		clusterConfig.GCPMaxRunHours = value
+	}
+
+	terminationAction, terminationActionSet, err := parseStringFlagValue(c, "--gcp-termination-action", "gcp-termination-action")
+	if err != nil {
+		return appstate.ClusterConfig{}, err
+	}
+	if terminationActionSet {
+		value := strings.ToUpper(strings.TrimSpace(terminationAction))
+		if value != "DELETE" && value != "STOP" {
+			return appstate.ClusterConfig{}, fmt.Errorf("--gcp-termination-action must be DELETE or STOP")
+		}
+		clusterConfig.GCPTerminationAction = value
+	}
+
+	diskSizeGB, diskSizeGBSet, err := parseIntFlagValue(c, "gcp-disk-size-gb", "", "--gcp-disk-size-gb", "--gcp-disk-size-gb must be a positive integer")
+	if err != nil {
+		return appstate.ClusterConfig{}, err
+	}
+	if diskSizeGBSet {
+		value := diskSizeGB
+		if value <= 0 {
+			return appstate.ClusterConfig{}, fmt.Errorf("--gcp-disk-size-gb must be a positive integer")
+		}
+		clusterConfig.GCPDiskSizeGB = value
+	}
+	clusterConfig.KeepDisks = c.Bool("keep-disks") || hasBoolArg(c.Args().Slice(), "keep-disks")
+	return clusterConfig, nil
+}
+
+func applyClusterConfig(startOptions cluster.StartOptions, clusterConfig appstate.ClusterConfig) cluster.StartOptions {
+	if machineType := strings.TrimSpace(clusterConfig.GCPMachineType); machineType != "" {
+		startOptions.MachineType = machineType
+	}
+	if clusterConfig.GCPMaxRunHours > 0 {
+		startOptions.MaxRunHours = clusterConfig.GCPMaxRunHours
+	}
+	if terminationAction := strings.TrimSpace(clusterConfig.GCPTerminationAction); terminationAction != "" {
+		startOptions.TerminationAction = terminationAction
+	}
+	if clusterConfig.GCPDiskSizeGB > 0 {
+		startOptions.DiskSizeGB = clusterConfig.GCPDiskSizeGB
+	}
+	startOptions.KeepDisks = clusterConfig.KeepDisks
+	return startOptions
 }
 
 func parseMaxHoursValue(c *cli.Context) (int, bool, error) {
-	if c.IsSet("max-hours") {
-		return c.Int("max-hours"), true, nil
+	return parseIntFlagValue(c, "max-hours", "", "--max-hours", "--max-hours must be a positive integer")
+}
+
+func parseIntFlagValue(c *cli.Context, flagName, shortFlag, longFlag, errMsg string) (int, bool, error) {
+	if c.IsSet(flagName) {
+		return c.Int(flagName), true, nil
 	}
-	return parseIntFlagFromArgs(c.Args().Slice(), "", "--max-hours", "--max-hours must be a positive integer")
+	return parseIntFlagFromArgs(c.Args().Slice(), shortFlag, longFlag, errMsg)
+}
+
+func parseStringFlagValue(c *cli.Context, longFlag, flagName string) (string, bool, error) {
+	if c.IsSet(flagName) {
+		return c.String(flagName), true, nil
+	}
+	return parseStringFlagFromArgs(c.Args().Slice(), longFlag)
 }
 
 func parseIntFlagFromArgs(args []string, shortFlag string, longFlag string, errMsg string) (int, bool, error) {
@@ -680,4 +788,20 @@ func parseIntFlagFromArgs(args []string, shortFlag string, longFlag string, errM
 		}
 	}
 	return value, found, nil
+}
+
+func parseStringFlagFromArgs(args []string, longFlag string) (string, bool, error) {
+	for idx := 0; idx < len(args); idx++ {
+		arg := args[idx]
+		switch {
+		case arg == longFlag:
+			if idx+1 >= len(args) {
+				return "", true, fmt.Errorf("%s requires a value", longFlag)
+			}
+			return args[idx+1], true, nil
+		case strings.HasPrefix(arg, longFlag+"="):
+			return strings.TrimPrefix(arg, longFlag+"="), true, nil
+		}
+	}
+	return "", false, nil
 }

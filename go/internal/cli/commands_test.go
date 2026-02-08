@@ -34,3 +34,33 @@ func TestParseIntFlagFromArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestParseStringFlagFromArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		value   string
+		found   bool
+		wantErr bool
+	}{
+		{name: "missing", args: []string{"foo"}, value: "", found: false, wantErr: false},
+		{name: "separated", args: []string{"foo", "--gcp-machine-type", "g2-standard-16"}, value: "g2-standard-16", found: true, wantErr: false},
+		{name: "equals", args: []string{"foo", "--gcp-machine-type=g2-standard-24"}, value: "g2-standard-24", found: true, wantErr: false},
+		{name: "missing value", args: []string{"foo", "--gcp-machine-type"}, value: "", found: true, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			value, found, err := parseStringFlagFromArgs(tc.args, "--gcp-machine-type")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err mismatch: got=%v wantErr=%v", err, tc.wantErr)
+			}
+			if value != tc.value {
+				t.Fatalf("value mismatch: got=%q want=%q", value, tc.value)
+			}
+			if found != tc.found {
+				t.Fatalf("found mismatch: got=%v want=%v", found, tc.found)
+			}
+		})
+	}
+}

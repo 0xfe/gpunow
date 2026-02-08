@@ -18,15 +18,19 @@ type Builder struct {
 }
 
 type Options struct {
-	Name        string
-	Network     string
-	Subnetwork  string
-	PublicIP    bool
-	Tags        []string
-	CloudInit   string
-	MaxRunHours int
-	Labels      map[string]string
-	Metadata    map[string]string
+	Name              string
+	Network           string
+	Subnetwork        string
+	PublicIP          bool
+	Tags              []string
+	CloudInit         string
+	MachineType       string
+	MaxRunHours       int
+	TerminationAction string
+	DiskSizeGB        int
+	DiskAutoDelete    *bool
+	Labels            map[string]string
+	Metadata          map[string]string
 }
 
 func NewBuilder(cfg *config.Config) *Builder {
@@ -50,18 +54,33 @@ func (b *Builder) Build(ctx context.Context, compute gcp.Compute, opts Options) 
 	if maxHours <= 0 {
 		maxHours = b.Config.Instance.MaxRunHours
 	}
+	machineTypeName := strings.TrimSpace(opts.MachineType)
+	if machineTypeName == "" {
+		machineTypeName = b.Config.Instance.MachineType
+	}
+	terminationAction := strings.TrimSpace(opts.TerminationAction)
+	if terminationAction == "" {
+		terminationAction = b.Config.Instance.TerminationAction
+	}
+	diskSizeGB := opts.DiskSizeGB
+	if diskSizeGB <= 0 {
+		diskSizeGB = b.Config.Disk.SizeGB
+	}
+	diskAutoDelete := b.Config.Disk.AutoDelete
+	if opts.DiskAutoDelete != nil {
+		diskAutoDelete = *opts.DiskAutoDelete
+	}
 
-	mergedLabels := labels.EnsureManaged(mergeLabels(b.Config.Labels, opts.Labels))
+	mergedLabels := labels.EnsureManaged(mergeLabels(nil, opts.Labels))
 
-	disk, err := b.buildBootDisk(ctx, compute, opts.Name, mergedLabels)
+	disk, err := b.buildBootDisk(ctx, compute, opts.Name, mergedLabels, diskSizeGB, diskAutoDelete)
 	if err != nil {
 		return nil, err
 	}
 
-	machineType := gcp.ZoneResource(project, zone, "machineTypes", b.Config.Instance.MachineType)
-	acceleratorType := gcp.ZoneResource(project, zone, "acceleratorTypes", b.Config.GPU.Type)
+	machineType := gcp.ZoneResource(project, zone, "machineTypes", machineTypeName)
 
-	scheduling := b.buildScheduling(maxHours)
+	scheduling := b.buildScheduling(maxHours, terminationAction)
 
 	tags := opts.Tags
 	if len(tags) == 0 {
@@ -94,18 +113,6 @@ func (b *Builder) Build(ctx context.Context, compute gcp.Compute, opts Options) 
 		Disks:             []*computepb.AttachedDisk{disk},
 		NetworkInterfaces: []*computepb.NetworkInterface{iface},
 		Scheduling:        scheduling,
-		ServiceAccounts: []*computepb.ServiceAccount{
-			{
-				Email:  proto.String(b.Config.ServiceAccount.Email),
-				Scopes: b.Config.ServiceAccount.Scopes,
-			},
-		},
-		GuestAccelerators: []*computepb.AcceleratorConfig{
-			{
-				AcceleratorCount: proto.Int32(int32(b.Config.GPU.Count)),
-				AcceleratorType:  proto.String(acceleratorType),
-			},
-		},
 		Tags: &computepb.Tags{
 			Items: tags,
 		},
@@ -120,6 +127,12 @@ func (b *Builder) Build(ctx context.Context, compute gcp.Compute, opts Options) 
 			ConsumeReservationType: proto.String(reservationAffinityType(b.Config.Reservation.Affinity)),
 		},
 		KeyRevocationActionType: proto.String(keyRevocationActionType(b.Config.Instance.KeyRevocationAction)),
+	}
+	if email := strings.TrimSpace(b.Config.ServiceAccount.Email); email != "" && len(b.Config.ServiceAccount.Scopes) > 0 {
+		instance.ServiceAccounts = []*computepb.ServiceAccount{{
+			Email:  proto.String(email),
+			Scopes: b.Config.ServiceAccount.Scopes,
+		}}
 	}
 	if hostname := b.hostname(opts.Name); hostname != "" {
 		instance.Hostname = proto.String(hostname)
@@ -141,22 +154,22 @@ func (b *Builder) hostname(name string) string {
 }
 
 func (b *Builder) Scheduling(maxHours int) *computepb.Scheduling {
-	return b.buildScheduling(maxHours)
+	return b.buildScheduling(maxHours, b.Config.Instance.TerminationAction)
 }
 
-func (b *Builder) buildScheduling(maxHours int) *computepb.Scheduling {
+func (b *Builder) buildScheduling(maxHours int, terminationAction string) *computepb.Scheduling {
 	duration := &computepb.Duration{Seconds: proto.Int64(int64(maxHours) * 3600)}
 
 	return &computepb.Scheduling{
 		ProvisioningModel:         proto.String(b.Config.Instance.ProvisioningModel),
 		OnHostMaintenance:         proto.String(b.Config.Instance.MaintenancePolicy),
-		InstanceTerminationAction: proto.String(b.Config.Instance.TerminationAction),
+		InstanceTerminationAction: proto.String(terminationAction),
 		AutomaticRestart:          proto.Bool(b.Config.Instance.RestartOnFailure),
 		MaxRunDuration:            duration,
 	}
 }
 
-func (b *Builder) buildBootDisk(ctx context.Context, compute gcp.Compute, name string, diskLabels map[string]string) (*computepb.AttachedDisk, error) {
+func (b *Builder) buildBootDisk(ctx context.Context, compute gcp.Compute, name string, diskLabels map[string]string, diskSizeGB int, autoDelete bool) (*computepb.AttachedDisk, error) {
 	project := b.Config.Project.ID
 	zone := b.Config.Project.Zone
 
@@ -168,7 +181,7 @@ func (b *Builder) buildBootDisk(ctx context.Context, compute gcp.Compute, name s
 	disk, err := compute.GetDisk(ctx, diskReq)
 	if err == nil && disk != nil {
 		return &computepb.AttachedDisk{
-			AutoDelete: proto.Bool(b.Config.Disk.AutoDelete),
+			AutoDelete: proto.Bool(autoDelete),
 			Boot:       proto.Bool(b.Config.Disk.Boot),
 			DeviceName: proto.String(name),
 			Mode:       proto.String(diskMode(b.Config.Disk.Mode)),
@@ -182,7 +195,7 @@ func (b *Builder) buildBootDisk(ctx context.Context, compute gcp.Compute, name s
 	diskType := gcp.ZoneResource(project, zone, "diskTypes", b.Config.Disk.Type)
 	initParams := &computepb.AttachedDiskInitializeParams{
 		DiskName:    proto.String(name),
-		DiskSizeGb:  proto.Int64(int64(b.Config.Disk.SizeGB)),
+		DiskSizeGb:  proto.Int64(int64(diskSizeGB)),
 		DiskType:    proto.String(diskType),
 		SourceImage: proto.String(b.Config.Disk.Image),
 	}
@@ -191,7 +204,7 @@ func (b *Builder) buildBootDisk(ctx context.Context, compute gcp.Compute, name s
 	}
 
 	return &computepb.AttachedDisk{
-		AutoDelete:       proto.Bool(b.Config.Disk.AutoDelete),
+		AutoDelete:       proto.Bool(autoDelete),
 		Boot:             proto.Bool(b.Config.Disk.Boot),
 		DeviceName:       proto.String(name),
 		Mode:             proto.String(diskMode(b.Config.Disk.Mode)),

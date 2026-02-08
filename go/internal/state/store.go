@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const stateVersion = 1
+const stateVersion = 2
 
 type Store struct {
 	Dir  string
@@ -23,15 +23,24 @@ type Data struct {
 }
 
 type Cluster struct {
-	Name         string `json:"name"`
-	Profile      string `json:"profile"`
-	NumInstances int    `json:"num_instances"`
-	Status       string `json:"status"`
-	CreatedAt    string `json:"created_at,omitempty"`
-	UpdatedAt    string `json:"updated_at,omitempty"`
-	LastAction   string `json:"last_action,omitempty"`
-	LastActionAt string `json:"last_action_at,omitempty"`
-	DeletedAt    string `json:"deleted_at,omitempty"`
+	Name         string        `json:"name"`
+	Profile      string        `json:"profile"`
+	NumInstances int           `json:"num_instances"`
+	Config       ClusterConfig `json:"config,omitempty"`
+	Status       string        `json:"status"`
+	CreatedAt    string        `json:"created_at,omitempty"`
+	UpdatedAt    string        `json:"updated_at,omitempty"`
+	LastAction   string        `json:"last_action,omitempty"`
+	LastActionAt string        `json:"last_action_at,omitempty"`
+	DeletedAt    string        `json:"deleted_at,omitempty"`
+}
+
+type ClusterConfig struct {
+	GCPMachineType       string `json:"gcp_machine_type,omitempty"`
+	GCPMaxRunHours       int    `json:"gcp_max_run_hours,omitempty"`
+	GCPTerminationAction string `json:"gcp_termination_action,omitempty"`
+	GCPDiskSizeGB        int    `json:"gcp_disk_size_gb,omitempty"`
+	KeepDisks            bool   `json:"keep_disks,omitempty"`
 }
 
 type VM struct {
@@ -52,7 +61,7 @@ func New(dir string) *Store {
 	}
 }
 
-func (s *Store) RecordClusterCreate(name, profile string, numInstances int, when time.Time) error {
+func (s *Store) RecordClusterCreate(name, profile string, numInstances int, clusterConfig ClusterConfig, when time.Time) error {
 	data, err := s.load()
 	if err != nil {
 		return err
@@ -72,6 +81,7 @@ func (s *Store) RecordClusterCreate(name, profile string, numInstances int, when
 	entry.UpdatedAt = ts
 	entry.Profile = profile
 	entry.NumInstances = numInstances
+	entry.Config = clusterConfig
 	entry.Status = "stopped"
 	entry.LastAction = "create"
 	entry.LastActionAt = ts
@@ -80,7 +90,7 @@ func (s *Store) RecordClusterCreate(name, profile string, numInstances int, when
 	return s.save(data)
 }
 
-func (s *Store) RecordClusterStart(name, profile string, numInstances int, when time.Time) error {
+func (s *Store) RecordClusterStart(name, profile string, numInstances int, clusterConfig ClusterConfig, when time.Time) error {
 	data, err := s.load()
 	if err != nil {
 		return err
@@ -100,6 +110,7 @@ func (s *Store) RecordClusterStart(name, profile string, numInstances int, when 
 	entry.UpdatedAt = ts
 	entry.Profile = profile
 	entry.NumInstances = numInstances
+	entry.Config = clusterConfig
 	entry.Status = "running"
 	entry.LastAction = "start"
 	entry.LastActionAt = ts
@@ -289,6 +300,12 @@ func (s *Store) load() (*Data, error) {
 }
 
 func (s *Store) save(data *Data) error {
+	if data == nil {
+		data = &Data{}
+	}
+	if data.Version < stateVersion {
+		data.Version = stateVersion
+	}
 	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}

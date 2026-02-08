@@ -31,16 +31,35 @@ $ gpunow create my-cluster -n 3 --estimate-cost
 $ gpunow ssh my-cluster/0
 my-cluster-0$
 
-# By defaul, all instances terminate in 12 hours, to terminate manually
+# By default, all instances terminate in 12 hours, to terminate manually
 # and optionally delete all resources
-gpunow stop my-cluster [--delete] [--keep-disks]
+gpunow stop my-cluster [--delete] [--delete-disks]
 ```
 
 ## Prerequisites
 
 - GCP credentials with Compute Engine permissions.
-- Compute Engine API enabled and quota for the selected GPU type.
+- Required APIs enabled for your project (see below).
 - Go 1.25.6 (to build from source)
+
+### Required GCP APIs
+
+Required:
+- `compute.googleapis.com` (Compute Engine API)
+
+Required only when using `gpunow create --estimate-cost`:
+- `cloudbilling.googleapis.com` (Cloud Billing Catalog API)
+
+Enable with `gcloud`:
+```bash
+gcloud services enable compute.googleapis.com --project <your-project-id>
+gcloud services enable cloudbilling.googleapis.com --project <your-project-id> # cost estimation only
+```
+
+Enable in Console:
+1. Open `APIs & Services` for your project.
+2. Enable `Compute Engine API`.
+3. If you use cost estimation, also enable `Cloud Billing API`.
 
 ## Authentication (ADC)
 

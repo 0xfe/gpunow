@@ -20,11 +20,9 @@ type Config struct {
 	Cluster        ClusterConfig        `toml:"cluster" validate:"required"`
 	Instance       InstanceConfig       `toml:"instance" validate:"required"`
 	Network        NetworkConfig        `toml:"network" validate:"required"`
-	GPU            GPUConfig            `toml:"gpu" validate:"required"`
 	Disk           DiskConfig           `toml:"disk" validate:"required"`
-	ServiceAccount ServiceAccountConfig `toml:"service_account" validate:"required"`
+	ServiceAccount ServiceAccountConfig `toml:"service_account"`
 	Shielded       ShieldedConfig       `toml:"shielded"`
-	Labels         map[string]string    `toml:"labels"`
 	Reservation    ReservationConfig    `toml:"reservation"`
 	SSH            SSHConfig            `toml:"ssh"`
 	Files          FilesConfig          `toml:"files" validate:"required"`
@@ -72,11 +70,6 @@ type NetworkConfig struct {
 	TagsBase       []string `toml:"tags_base" validate:"min=1,dive,required"`
 }
 
-type GPUConfig struct {
-	Type  string `toml:"type" validate:"required"`
-	Count int    `toml:"count" validate:"gt=0"`
-}
-
 type DiskConfig struct {
 	Boot       bool   `toml:"boot"`
 	AutoDelete bool   `toml:"auto_delete"`
@@ -87,8 +80,8 @@ type DiskConfig struct {
 }
 
 type ServiceAccountConfig struct {
-	Email  string   `toml:"email" validate:"required"`
-	Scopes []string `toml:"scopes" validate:"min=1,dive,required"`
+	Email  string   `toml:"email"`
+	Scopes []string `toml:"scopes"`
 }
 
 type ShieldedConfig struct {
@@ -112,7 +105,7 @@ type FilesConfig struct {
 	Zshrc       string `toml:"zshrc" validate:"required"`
 }
 
-const configVersion = 2
+const configVersion = 3
 
 func Load(profile string, baseDir string) (*Config, error) {
 	if baseDir == "" {
@@ -159,6 +152,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Version == 0 {
 		cfg.Version = configVersion
 	}
+	if cfg.Instance.HostnameDomain == "" {
+		cfg.Instance.HostnameDomain = "gpunow"
+	}
 	if cfg.Files.CloudInit == "" {
 		cfg.Files.CloudInit = "cloud-init.yaml"
 	}
@@ -187,6 +183,12 @@ func validateConfig(cfg *Config) error {
 	}
 	if cfg.Instance.HostnameDomain != "" && !validate.IsHostnameDomain(cfg.Instance.HostnameDomain) {
 		return fmt.Errorf("instance.hostname_domain must be a valid DNS domain like example.com")
+	}
+	if cfg.ServiceAccount.Email == "" && len(cfg.ServiceAccount.Scopes) > 0 {
+		return fmt.Errorf("service_account.email is required when service_account.scopes are set")
+	}
+	if cfg.ServiceAccount.Email != "" && len(cfg.ServiceAccount.Scopes) == 0 {
+		return fmt.Errorf("service_account.scopes is required when service_account.email is set")
 	}
 
 	if err := ensureFile(cfg.Paths.CloudInitFile); err != nil {

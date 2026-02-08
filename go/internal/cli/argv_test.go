@@ -37,6 +37,11 @@ func TestNormalizeArgs(t *testing.T) {
 			want: []string{"gpunow", "start", "foo", "-n", "3"},
 		},
 		{
+			name: "config command remains",
+			in:   []string{"gpunow", "config", "--gcp-zone", "us-east1-d"},
+			want: []string{"gpunow", "config", "--gcp-zone", "us-east1-d"},
+		},
+		{
 			name: "no create flags remains",
 			in:   []string{"gpunow", "foo"},
 			want: []string{"gpunow", "foo"},

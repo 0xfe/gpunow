@@ -1,6 +1,6 @@
 # gpunow configuration (default profile)
 # This file is intentionally structured for extensibility.
-version = 2
+version = 3
 
 [project]
 id = "symbolic-axe-717"
@@ -22,9 +22,8 @@ termination_action = "DELETE"
 max_run_hours = 12
 restart_on_failure = false
 key_revocation_action = "stop"
-# Optional: when set, gpunow will set the instance hostname to <name>.<hostname_domain>.
-# Leave empty to let GCE choose the default internal DNS hostname.
-hostname_domain = "mo.town"
+# gpunow sets instance hostname to <name>.<hostname_domain>.
+hostname_domain = "gpunow"
 
 [network]
 default_network = "default"
@@ -32,10 +31,6 @@ stack_type = "IPV4_ONLY"
 network_tier = "PREMIUM"
 ports = [22]
 tags_base = ["http-server", "https-server", "lb-health-check"]
-
-[gpu]
-type = "nvidia-l4"
-count = 1
 
 [disk]
 boot = true
@@ -46,6 +41,8 @@ mode = "rw"
 image = "projects/ubuntu-os-accelerator-images/global/images/ubuntu-accelerator-2404-amd64-with-nvidia-580-v20260118"
 
 [service_account]
+# Optional. When set, VMs use this service account and scopes.
+# Leave this section empty/removed to use the project default compute identity.
 email = "846951638556-compute@developer.gserviceaccount.com"
 scopes = [
   "https://www.googleapis.com/auth/devstorage.read_only",
@@ -60,11 +57,6 @@ scopes = [
 secure_boot = false
 vtpm = true
 integrity_monitoring = true
-
-[labels]
-gpu = ""
-dev = ""
-"goog-ec-src" = "vm_add-gcloud"
 
 [reservation]
 affinity = "none"

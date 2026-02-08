@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	compute "cloud.google.com/go/compute/apiv1"
@@ -31,14 +32,20 @@ type Service struct {
 }
 
 type StartOptions struct {
-	NumInstances int
-	SSHUser      string
-	SSHPublicKey string
+	NumInstances      int
+	SSHUser           string
+	SSHPublicKey      string
+	MachineType       string
+	MaxRunHours       int
+	TerminationAction string
+	DiskSizeGB        int
+	KeepDisks         bool
 }
 
 type StopOptions struct {
-	Delete    bool
-	KeepDisks bool
+	Delete      bool
+	KeepDisks   bool
+	DeleteDisks bool
 }
 
 type UpdateOptions struct {
@@ -236,15 +243,19 @@ func (s *Service) Start(ctx context.Context, clusterName string, opts StartOptio
 			}
 
 			instanceReq, err := s.Builder.Build(groupCtx, s.Compute, instance.Options{
-				Name:        name,
-				Network:     networkURL,
-				Subnetwork:  subnetURL,
-				PublicIP:    publicIP,
-				Tags:        tags,
-				CloudInit:   cloudInit,
-				Labels:      labels,
-				Metadata:    metadata,
-				MaxRunHours: s.Config.Instance.MaxRunHours,
+				Name:              name,
+				Network:           networkURL,
+				Subnetwork:        subnetURL,
+				PublicIP:          publicIP,
+				Tags:              tags,
+				CloudInit:         cloudInit,
+				Labels:            labels,
+				Metadata:          metadata,
+				MachineType:       strings.TrimSpace(opts.MachineType),
+				MaxRunHours:       opts.MaxRunHours,
+				TerminationAction: strings.ToUpper(strings.TrimSpace(opts.TerminationAction)),
+				DiskSizeGB:        opts.DiskSizeGB,
+				DiskAutoDelete:    diskAutoDeleteOverride(opts.KeepDisks),
 			})
 			if err != nil {
 				return err
@@ -280,8 +291,8 @@ func (s *Service) Stop(ctx context.Context, clusterName string, opts StopOptions
 	if !validate.IsResourceName(clusterName) {
 		return fmt.Errorf("invalid cluster name: %s", clusterName)
 	}
-	if !opts.Delete && opts.KeepDisks {
-		return fmt.Errorf("--keep-disks requires --delete")
+	if !opts.Delete && (opts.KeepDisks || opts.DeleteDisks) {
+		return fmt.Errorf("--delete-disks requires --delete")
 	}
 
 	split := s.UI.StartLiveSplit()
@@ -336,7 +347,11 @@ func (s *Service) Stop(ctx context.Context, clusterName string, opts StopOptions
 		name := inst.GetName()
 		group.Go(func() error {
 			if opts.Delete {
-				if err := s.setAutoDelete(groupCtx, name, inst, !opts.KeepDisks); err != nil {
+				autoDelete := !opts.KeepDisks
+				if opts.DeleteDisks {
+					autoDelete = true
+				}
+				if err := s.setAutoDelete(groupCtx, name, inst, autoDelete); err != nil {
 					return err
 				}
 				call := s.api("compute.instances.delete", gcp.ZoneResource(project, zone, "instances", name), fmt.Sprintf("Deleting %s", name))
@@ -943,6 +958,14 @@ func (s *Service) clusterTags(clusterName string, master bool) []string {
 
 func (s *Service) instanceName(clusterName string, index int) string {
 	return fmt.Sprintf("%s-%d", clusterName, index)
+}
+
+func diskAutoDeleteOverride(keepDisks bool) *bool {
+	if !keepDisks {
+		return nil
+	}
+	value := false
+	return &value
 }
 
 func portsToStrings(ports []int) []string {

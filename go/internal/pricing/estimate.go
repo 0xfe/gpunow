@@ -3,7 +3,6 @@ package pricing
 import (
 	"context"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"time"
@@ -193,11 +192,15 @@ func validateRequest(req Request) error {
 	if req.MemoryMB <= 0 {
 		return fmt.Errorf("memory MB must be positive")
 	}
-	if strings.TrimSpace(req.GPUType) == "" {
-		return fmt.Errorf("gpu type is required")
+	gpuType := strings.TrimSpace(req.GPUType)
+	if gpuType == "" && req.GPUCount > 0 {
+		return fmt.Errorf("gpu type is required when gpu count is set")
 	}
-	if req.GPUCount <= 0 {
-		return fmt.Errorf("gpu count must be positive")
+	if gpuType != "" && req.GPUCount <= 0 {
+		return fmt.Errorf("gpu count must be positive when gpu type is set")
+	}
+	if req.GPUCount < 0 {
+		return fmt.Errorf("gpu count cannot be negative")
 	}
 	if strings.TrimSpace(req.DiskType) == "" {
 		return fmt.Errorf("disk type is required")
@@ -277,18 +280,22 @@ func buildSelectors(req Request) ([]skuSelector, error) {
 
 	coreTokens := []string{familyToken, "instance", "core"}
 	ramTokens := []string{familyToken, "instance", "ram"}
+	coreForbiddenTokens := []string{"sole tenancy", "commitment", "committed use", "reservation"}
+	ramForbiddenTokens := []string{"sole tenancy", "commitment", "committed use", "reservation"}
 	if custom {
 		coreTokens = append(coreTokens, "custom")
 		ramTokens = append(ramTokens, "custom")
+	} else {
+		coreForbiddenTokens = append(coreForbiddenTokens, "custom")
+		ramForbiddenTokens = append(ramForbiddenTokens, "custom")
 	}
 
-	gpuTokens := gpuDescriptionTokens(req.GPUType)
-	gpuTokens = append(gpuTokens, "gpu")
-
-	diskTokens := diskDescriptionTokens(req.DiskType)
+	diskGroup, diskTokens, diskForbiddenTokens := diskSelectorCriteria(req.DiskType)
+	if len(diskForbiddenTokens) == 0 {
+		diskForbiddenTokens = []string{"snapshot", "egress", "operation"}
+	}
 
 	machineKey := normalizeKeyPart(req.MachineType)
-	gpuKey := normalizeKeyPart(req.GPUType)
 	diskKey := normalizeKeyPart(req.DiskType)
 
 	selectors := []skuSelector{
@@ -300,7 +307,7 @@ func buildSelectors(req Request) ([]skuSelector, error) {
 			ResourceGroup:       "CPU",
 			Usage:               usage,
 			RequiredTokens:      coreTokens,
-			ForbiddenTokens:     []string{"sole tenancy", "commitment", "committed use", "reservation"},
+			ForbiddenTokens:     coreForbiddenTokens,
 			QuantityPerInstance: float64(req.VCPU),
 			QuantityUnit:        "vCPU",
 		},
@@ -312,11 +319,28 @@ func buildSelectors(req Request) ([]skuSelector, error) {
 			ResourceGroup:       "RAM",
 			Usage:               usage,
 			RequiredTokens:      ramTokens,
-			ForbiddenTokens:     []string{"sole tenancy", "commitment", "committed use", "reservation"},
+			ForbiddenTokens:     ramForbiddenTokens,
 			QuantityPerInstance: memoryGiB,
 			QuantityUnit:        "GiB",
 		},
 		{
+			Key:                 fmt.Sprintf("compute.disk.%s.%s", diskKey, region),
+			Name:                "Disk",
+			Region:              region,
+			ResourceFamily:      "Storage",
+			ResourceGroup:       diskGroup,
+			Usage:               usageAny,
+			RequiredTokens:      diskTokens,
+			ForbiddenTokens:     diskForbiddenTokens,
+			QuantityPerInstance: float64(req.DiskSizeGB),
+			QuantityUnit:        "GiB",
+		},
+	}
+	if gpuType := strings.TrimSpace(req.GPUType); gpuType != "" && req.GPUCount > 0 {
+		gpuTokens := gpuDescriptionTokens(gpuType)
+		gpuTokens = append(gpuTokens, "gpu")
+		gpuKey := normalizeKeyPart(gpuType)
+		selectors = append(selectors, skuSelector{
 			Key:                 fmt.Sprintf("compute.gpu.%s.%s.%s", gpuKey, usageKey(usage), region),
 			Name:                "GPU",
 			Region:              region,
@@ -327,19 +351,7 @@ func buildSelectors(req Request) ([]skuSelector, error) {
 			ForbiddenTokens:     []string{"sole tenancy", "commitment", "committed use"},
 			QuantityPerInstance: float64(req.GPUCount),
 			QuantityUnit:        "GPU",
-		},
-		{
-			Key:                 fmt.Sprintf("compute.disk.%s.%s", diskKey, region),
-			Name:                "Disk",
-			Region:              region,
-			ResourceFamily:      "Storage",
-			ResourceGroup:       "",
-			Usage:               usageAny,
-			RequiredTokens:      diskTokens,
-			ForbiddenTokens:     []string{"snapshot", "egress", "operation"},
-			QuantityPerInstance: float64(req.DiskSizeGB),
-			QuantityUnit:        "GiB",
-		},
+		})
 	}
 	return selectors, nil
 }
@@ -375,7 +387,8 @@ func resolveSelector(skus []*cloudbilling.Sku, sel skuSelector, currency string)
 		if !skuMatchesRegion(sku, sel.Region) {
 			continue
 		}
-		if !skuMatchesUsage(sku.Category.UsageType, sel.Usage) {
+		usageScore := usageMatchScore(sku.Category.UsageType, sel.Usage)
+		if usageScore == 0 {
 			continue
 		}
 
@@ -402,9 +415,7 @@ func resolveSelector(skus []*cloudbilling.Sku, sel skuSelector, currency string)
 		if sel.ResourceGroup != "" && strings.EqualFold(sku.Category.ResourceGroup, sel.ResourceGroup) {
 			score++
 		}
-		if skuMatchesUsage(sku.Category.UsageType, sel.Usage) {
-			score++
-		}
+		score += usageScore
 		candidates = append(candidates, candidate{entry: entry, score: score})
 	}
 
@@ -463,20 +474,23 @@ func latestUnitPrice(sku *cloudbilling.Sku) (float64, string, string, error) {
 		return 0, "", "", fmt.Errorf("tiered rates unavailable")
 	}
 
-	minTier := expr.TieredRates[0]
-	for _, rate := range expr.TieredRates[1:] {
-		if rate.StartUsageAmount < minTier.StartUsageAmount {
-			minTier = rate
+	var pricedTier *cloudbilling.TierRate
+	for _, rate := range expr.TieredRates {
+		if rate == nil || rate.UnitPrice == nil {
+			continue
+		}
+		if moneyToFloat(rate.UnitPrice) <= 0 {
+			continue
+		}
+		if pricedTier == nil || rate.StartUsageAmount < pricedTier.StartUsageAmount {
+			pricedTier = rate
 		}
 	}
-	if minTier == nil || minTier.UnitPrice == nil {
+	if pricedTier == nil {
 		return 0, "", "", fmt.Errorf("unit price unavailable")
 	}
-	if math.Abs(minTier.StartUsageAmount) > 1e-9 {
-		return 0, "", "", fmt.Errorf("non-zero pricing tier start is unsupported")
-	}
 
-	price := moneyToFloat(minTier.UnitPrice)
+	price := moneyToFloat(pricedTier.UnitPrice)
 	if price <= 0 {
 		return 0, "", "", fmt.Errorf("non-positive unit price")
 	}
@@ -528,13 +542,33 @@ func skuMatchesRegion(sku *cloudbilling.Sku, region string) bool {
 }
 
 func skuMatchesUsage(actual string, expected usageExpectation) bool {
+	return usageMatchScore(actual, expected) > 0
+}
+
+func usageMatchScore(actual string, expected usageExpectation) int {
+	actualValue := strings.ToLower(strings.TrimSpace(actual))
 	switch expected {
 	case usageSpot:
-		return strings.EqualFold(actual, "Preemptible") || strings.EqualFold(actual, "Spot")
+		switch actualValue {
+		case "spot":
+			return 3
+		case "preemptible":
+			return 2
+		default:
+			return 0
+		}
 	case usageOnDemand:
-		return strings.EqualFold(actual, "OnDemand") || strings.EqualFold(actual, "On Demand")
+		switch actualValue {
+		case "ondemand", "on demand":
+			return 3
+		default:
+			return 0
+		}
 	default:
-		return true
+		if actualValue == "" {
+			return 1
+		}
+		return 2
 	}
 }
 
@@ -636,6 +670,37 @@ func diskDescriptionTokens(diskType string) []string {
 			tokens = append(tokens, "disk")
 		}
 		return tokens
+	}
+}
+
+func diskSelectorCriteria(diskType string) (resourceGroup string, required []string, forbidden []string) {
+	switch strings.ToLower(strings.TrimSpace(diskType)) {
+	case "pd-standard":
+		return "PDStandard",
+			[]string{"storage", "pd", "capacity"},
+			[]string{"snapshot", "instant snapshot", "egress", "operation", "regional"}
+	case "pd-balanced":
+		return "SSD",
+			[]string{"balanced", "pd", "capacity"},
+			[]string{"snapshot", "instant snapshot", "egress", "operation", "regional", "hyperdisk", "asynchronous replication", "storage pools", "high availability", "confidential mode"}
+	case "pd-ssd":
+		return "SSD",
+			[]string{"ssd", "pd", "capacity"},
+			[]string{"snapshot", "instant snapshot", "egress", "operation", "regional", "hyperdisk", "asynchronous replication", "storage pools", "high availability", "confidential mode", "balanced"}
+	case "hyperdisk-balanced":
+		return "SSD",
+			[]string{"hyperdisk", "balanced", "capacity"},
+			[]string{"snapshot", "instant snapshot", "egress", "operation", "asynchronous replication", "storage pools", "high availability", "confidential mode"}
+	case "hyperdisk-throughput":
+		return "SSD",
+			[]string{"hyperdisk", "throughput", "capacity"},
+			[]string{"snapshot", "instant snapshot", "egress", "operation", "asynchronous replication", "storage pools", "confidential mode"}
+	case "hyperdisk-extreme":
+		return "SSD",
+			[]string{"hyperdisk", "extreme", "capacity"},
+			[]string{"snapshot", "instant snapshot", "egress", "operation", "asynchronous replication", "storage pools", "confidential mode"}
+	default:
+		return "", diskDescriptionTokens(diskType), []string{"snapshot", "egress", "operation"}
 	}
 }
 

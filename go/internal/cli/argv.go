@@ -5,6 +5,7 @@ import "strings"
 var knownCommands = map[string]struct{}{
 	"help":    {},
 	"install": {},
+	"config":  {},
 	"create":  {},
 	"start":   {},
 	"stop":    {},

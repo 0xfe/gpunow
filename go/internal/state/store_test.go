@@ -13,10 +13,17 @@ func TestStoreRecordClusterLifecycle(t *testing.T) {
 	store := New(tmp)
 
 	when := time.Date(2026, 2, 5, 20, 0, 0, 0, time.UTC)
-	if err := store.RecordClusterCreate("alpha", "default", 3, when.Add(-time.Hour)); err != nil {
+	if err := store.RecordClusterCreate("alpha", "default", 3, ClusterConfig{}, when.Add(-time.Hour)); err != nil {
 		t.Fatalf("record create: %v", err)
 	}
-	if err := store.RecordClusterStart("alpha", "default", 3, when); err != nil {
+	cfg := ClusterConfig{
+		GCPMachineType:       "g2-standard-16",
+		GCPMaxRunHours:       12,
+		GCPTerminationAction: "DELETE",
+		GCPDiskSizeGB:        200,
+		KeepDisks:            true,
+	}
+	if err := store.RecordClusterStart("alpha", "default", 3, cfg, when); err != nil {
 		t.Fatalf("record start: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(tmp, "state.json"))
@@ -36,6 +43,9 @@ func TestStoreRecordClusterLifecycle(t *testing.T) {
 	}
 	if entry.LastAction != "start" {
 		t.Fatalf("expected last action start, got: %+v", entry)
+	}
+	if !entry.Config.KeepDisks {
+		t.Fatalf("expected keep_disks in config, got: %+v", entry.Config)
 	}
 
 	if err := store.RecordClusterStop("alpha", true, when.Add(1*time.Hour)); err != nil {
@@ -59,7 +69,7 @@ func TestStoreRecordClusterCreate(t *testing.T) {
 	store := New(tmp)
 
 	when := time.Date(2026, 2, 6, 10, 0, 0, 0, time.UTC)
-	if err := store.RecordClusterCreate("beta", "default", 2, when); err != nil {
+	if err := store.RecordClusterCreate("beta", "default", 2, ClusterConfig{}, when); err != nil {
 		t.Fatalf("record create: %v", err)
 	}
 	data, err := store.Load()
